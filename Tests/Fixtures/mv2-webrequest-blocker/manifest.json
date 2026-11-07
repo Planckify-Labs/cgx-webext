@@ -1,0 +1,9 @@
+{
+  "manifest_version": 2,
+  "name": "Request Blocker (MV2)",
+  "version": "0.3",
+  "permissions": ["webRequest", "webRequestBlocking", "<all_urls>", "storage"],
+  "background": { "scripts": ["bg.js"], "persistent": true },
+  "browser_action": { "default_title": "Blocker" },
+  "browser_specific_settings": { "gecko": { "id": "blocker@example.org" } }
+}

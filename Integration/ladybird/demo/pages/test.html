@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>cgx-webext test page</title>
+<style>body{font:16px/1.5 sans-serif;margin:32px}</style></head>
+<body>
+<h1>cgx-webext test page</h1>
+<p>If the demo extension is loaded, a green banner appears at the bottom of this page.</p>
+<p id="page-check"></p>
+<script>
+  // The page itself must NOT see the extension's chrome object (content scripts keep it to themselves).
+  document.getElementById('page-check').textContent =
+    'Page script sees window.chrome: ' + (typeof window.chrome) + ', window.__cgxBridge: ' + (typeof window.__cgxBridge);
+</script>
+</body>
+</html>

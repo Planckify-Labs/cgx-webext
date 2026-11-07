@@ -1,0 +1,5 @@
+{
+  "extName": { "message": "Storage Popup" },
+  "extDescription": { "message": "Counts alarm ticks." },
+  "visitCount": { "message": "Ticks so far: $COUNT$", "placeholders": { "count": { "content": "$1" } } }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "webext-ffi"
+description = "C ABI for embedding the webext core in a browser written in C or C++"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "webext_ffi"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+webext = { path = "../webext" }
+serde_json.workspace = true
+
+# This crate is the one place that needs `unsafe`: it is the boundary with C. Everything behind it is safe Rust.
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "warn"

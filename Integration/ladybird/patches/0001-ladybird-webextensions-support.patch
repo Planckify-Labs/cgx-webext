@@ -1,0 +1,2702 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7a8777be..5377fc48 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -122,6 +122,17 @@ add_lagom_library_install_rules(GenericClangPlugin)
+ add_lagom_library_install_rules(JSClangPlugin)
+ 
+ add_subdirectory(AK)
++
++if (ENABLE_WEBEXT)
++    if (NOT WEBEXT_SOURCE_DIR OR NOT EXISTS "${WEBEXT_SOURCE_DIR}/CMakeLists.txt")
++        message(FATAL_ERROR "ENABLE_WEBEXT requires WEBEXT_SOURCE_DIR to point to a checkout of cgx-webext")
++    endif()
++    # Defines WebExt::WebExt, which LibWebView links. Run cargo from this directory so that the Rust toolchain pinned in
++    # rust-toolchain.toml is the one that builds it.
++    set(WEBEXT_CARGO_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
++    add_subdirectory("${WEBEXT_SOURCE_DIR}" cgx-webext)
++endif()
++
+ add_subdirectory(Libraries)
+ 
+ if (ENABLE_FUZZERS)
+diff --git a/Libraries/LibURL/Rust/src/origin.rs b/Libraries/LibURL/Rust/src/origin.rs
+index 94e28b42..c6a2edf8 100644
+--- a/Libraries/LibURL/Rust/src/origin.rs
++++ b/Libraries/LibURL/Rust/src/origin.rs
+@@ -247,6 +247,9 @@ impl<Serialization: AsRef<str>> Url<Serialization> {
+             // AD-HOC: resource:// URLs are internal browser resources; give them a shared tuple origin
+             // so that same-origin checks pass between any two resource:// documents or worker scripts.
+             "resource" => Origin::new_tuple("resource", empty_host(), None),
++            // AD-HOC: Extension pages (chrome-extension://<id>/, moz-extension://<uuid>/) each have a tuple origin of their own,
++            // so that they get storage, same-origin checks and a CSP "self", and so that one extension cannot read another.
++            "chrome-extension" | "moz-extension" => Origin::new_tuple(self.scheme(), self.host(), self.port()),
+             // -> "file"
+             "file" => {
+                 // Unfortunate as it is, this is left as an exercise to the reader. When in doubt, return a new opaque origin.
+diff --git a/Libraries/LibWeb/CMakeLists.txt b/Libraries/LibWeb/CMakeLists.txt
+index 85099c3a..e4756554 100644
+--- a/Libraries/LibWeb/CMakeLists.txt
++++ b/Libraries/LibWeb/CMakeLists.txt
+@@ -656,6 +656,7 @@ set(SOURCES
+     Internals/InternalGamepad.cpp
+     Internals/Internals.cpp
+     Internals/InternalsBase.cpp
++    Internals/ExtensionBridge.cpp
+     Internals/WebUI.cpp
+     IntersectionObserver/IntersectionObserver.cpp
+     IntersectionObserver/IntersectionObserverEntry.cpp
+diff --git a/Libraries/LibWeb/DOM/Document.cpp b/Libraries/LibWeb/DOM/Document.cpp
+index 74c36d01..3c96f61e 100644
+--- a/Libraries/LibWeb/DOM/Document.cpp
++++ b/Libraries/LibWeb/DOM/Document.cpp
+@@ -106,6 +106,7 @@
+ #include <LibWeb/DOM/CustomEvent.h>
+ #include <LibWeb/DOM/DOMImplementation.h>
+ #include <LibWeb/DOM/Document.h>
++#include <LibWeb/Internals/ExtensionBridge.h>
+ #include <LibWeb/DOM/DocumentFragment.h>
+ #include <LibWeb/DOM/DocumentObserver.h>
+ #include <LibWeb/DOM/DocumentOrShadowRoot.h>
+@@ -591,6 +592,11 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
+     // 10. Set window's associated Document to document.
+     window->set_associated_document(*document);
+ 
++    // AD-HOC (cgx-webext): The pages of browser extensions talk to the extension core through a bridge object, defined
++    //                      here so that it exists before any script of the page runs.
++    if (Internals::ExtensionBridge::is_extension_origin(document->origin()))
++        Internals::ExtensionBridge::install_for_extension_page(HTML::relevant_realm(*window), *window);
++
+     // https://w3c.github.io/webappsec-upgrade-insecure-requests/#nesting
+     // AD-HOC: A Document in a child navigable inherits the insecure requests policy of its container's node document
+     //         when it is created, as Chromium and WebKit do, instead of through its browsing context.
+@@ -1170,6 +1176,8 @@ void Document::visit_edges(Cell::Visitor& visitor)
+     visitor.visit(m_deferred_parser_start);
+     visitor.visit(m_custom_element_registry);
+     visitor.visit(m_ancestor_origins_list);
++    for (auto& [id, bridge] : m_extension_bridges)
++        visitor.visit(bridge);
+ }
+ 
+ bool Document::content_blocking_enabled() const
+@@ -5372,6 +5380,12 @@ void Document::update_readiness(HTML::DocumentReadyState readiness_value)
+         }
+     }
+ 
++    // AD-HOC (cgx-webext): document_end content scripts run once the DOM is complete, document_idle ones once loading is.
++    if (readiness_value == HTML::DocumentReadyState::Interactive)
++        Internals::ExtensionBridge::run_content_script_stage(*this, "document_end"sv);
++    else if (readiness_value == HTML::DocumentReadyState::Complete)
++        Internals::ExtensionBridge::run_content_script_stage(*this, "document_idle"sv);
++
+     // 4. Fire an event named readystatechange at document.
+     dispatch_event(Event::create(
+         HTML::EventNames::readystatechange,
+@@ -8692,6 +8706,11 @@ void Document::update_for_history_step_application(NonnullRefPtr<HTML::SessionHi
+ void Document::set_ready_to_run_scripts()
+ {
+     m_ready_to_run_scripts = true;
++
++    // AD-HOC (cgx-webext): document_start content scripts of browser extensions run now: the document may run script, and
++    //                      its parser has not started.
++    Internals::ExtensionBridge::inject_content_scripts(*this);
++
+     if (auto callback = m_deferred_parser_start) {
+         m_deferred_parser_start = nullptr;
+         callback->function()();
+diff --git a/Libraries/LibWeb/DOM/Document.h b/Libraries/LibWeb/DOM/Document.h
+index e331d987..2ba118b8 100644
+--- a/Libraries/LibWeb/DOM/Document.h
++++ b/Libraries/LibWeb/DOM/Document.h
+@@ -1146,6 +1146,20 @@ public:
+     void set_mute_iframe_load(bool value) { m_mute_iframe_load = value; }
+ 
+     HTML::CrossProcessId id() const { return m_id.value(); }
++
++    // AD-HOC (cgx-webext): Extension bridges of this document: "" for an extension's own page, else one per extension
++    //                      whose content scripts run in it.
++    GC::Ptr<Internals::ExtensionBridge> extension_bridge(String const& extension_id) const { return m_extension_bridges.get(extension_id).value_or(nullptr); }
++    void set_extension_bridge(String const& extension_id, GC::Ref<Internals::ExtensionBridge> bridge) { m_extension_bridges.set(extension_id, bridge); }
++    Vector<GC::Ref<Internals::ExtensionBridge>> content_script_bridges() const
++    {
++        Vector<GC::Ref<Internals::ExtensionBridge>> bridges;
++        for (auto const& [id, bridge] : m_extension_bridges) {
++            if (!id.is_empty())
++                bridges.append(*bridge);
++        }
++        return bridges;
++    }
+     void set_id(HTML::CrossProcessId);
+ 
+     // https://html.spec.whatwg.org/multipage/dom.html#concept-document-about-base-url
+@@ -2671,6 +2685,7 @@ private:
+ 
+     // https://html.spec.whatwg.org/multipage/dom.html#concept-document-ancestor-origins-list
+     GC::Ptr<HTML::DOMStringList> m_ancestor_origins_list;
++    HashMap<String, GC::Ptr<Internals::ExtensionBridge>> m_extension_bridges;
+ };
+ 
+ template<>
+diff --git a/Libraries/LibWeb/Fetch/Fetching/Fetching.cpp b/Libraries/LibWeb/Fetch/Fetching/Fetching.cpp
+index f1ae7f22..586b4907 100644
+--- a/Libraries/LibWeb/Fetch/Fetching/Fetching.cpp
++++ b/Libraries/LibWeb/Fetch/Fetching/Fetching.cpp
+@@ -1592,6 +1592,35 @@ GC::Ref<PendingResponse> scheme_fetch(JS::Realm& realm, Infrastructure::FetchPar
+         response->set_body(Infrastructure::byte_sequence_as_response_body(data_url_struct.value().body));
+         return PendingResponse::create(fetch_params, response);
+     }
++    // -> "chrome-extension"
++    // -> "moz-extension"
++    // AD-HOC (cgx-webext): The pages and files of browser extensions are served by the browser process, which also decides
++    //                      whether the requester may have them (web_accessible_resources).
++    else if (request->current_url().scheme() == "chrome-extension"sv || request->current_url().scheme() == "moz-extension"sv) {
++        auto& page = Bindings::principal_host_defined_page(realm);
++
++        // A navigation that the browser itself started (typed URL, command line) has no client; everything else names the
++        // origin it comes from.
++        bool browser_initiated_navigation = !request->client_snapshot() && request->mode() == Infrastructure::Request::Mode::Navigate;
++        ByteString initiator_origin;
++        if (!browser_initiated_navigation) {
++            auto const* origin = request->origin().get_pointer<URL::Origin>();
++            initiator_origin = origin ? origin->serialize().to_byte_string() : ByteString { "null"sv };
++        }
++
++        auto resource = page.client().page_did_request_extension_resource(request->current_url(), initiator_origin);
++        if (!resource.has_value())
++            return PendingResponse::create(fetch_params, Infrastructure::Response::network_error("Request URL does not belong to an installed extension"_string));
++
++        auto response = Infrastructure::Response::create();
++        response->set_status(resource->status);
++        response->set_status_message(resource->status == 200 ? "OK"sv : "Error"sv);
++        response->header_list()->append(HTTP::Header::isomorphic_encode("Content-Type"sv, resource->mime_type.bytes_as_string_view()));
++        if (resource->content_security_policy.has_value())
++            response->header_list()->append(HTTP::Header::isomorphic_encode("Content-Security-Policy"sv, resource->content_security_policy->bytes_as_string_view()));
++        response->set_body(Infrastructure::byte_sequence_as_response_body(resource->body.bytes()));
++        return PendingResponse::create(fetch_params, response);
++    }
+     // -> "file"
+     // AD-HOC: "resource"
+     else if (request->current_url().scheme() == "file"sv || request->current_url().scheme() == "resource"sv) {
+diff --git a/Libraries/LibWeb/Forward.h b/Libraries/LibWeb/Forward.h
+index 7ebbe4f3..b05d10bf 100644
+--- a/Libraries/LibWeb/Forward.h
++++ b/Libraries/LibWeb/Forward.h
+@@ -875,6 +875,7 @@ class IDBFactory;
+ 
+ namespace Web::Internals {
+ 
++class ExtensionBridge;
+ class Internals;
+ class InternalGamepad;
+ class WebUI;
+diff --git a/Libraries/LibWeb/Internals/ExtensionBridge.cpp b/Libraries/LibWeb/Internals/ExtensionBridge.cpp
+new file mode 100644
+index 00000000..d0017042
+--- /dev/null
++++ b/Libraries/LibWeb/Internals/ExtensionBridge.cpp
+@@ -0,0 +1,181 @@
++/*
++ * Copyright (c) 2026, cgx-webext contributors
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include <AK/JsonArray.h>
++#include <AK/JsonObject.h>
++#include <AK/JsonValue.h>
++#include <LibGC/Heap.h>
++#include <LibJS/Runtime/AbstractOperations.h>
++#include <LibJS/Runtime/Error.h>
++#include <LibJS/Runtime/PrimitiveString.h>
++#include <LibURL/Origin.h>
++#include <LibWeb/Bindings/PlatformObject.h>
++#include <LibWeb/Bindings/PrincipalHostDefined.h>
++#include <LibWeb/Bindings/Wrappable.h>
++#include <LibWeb/Bindings/WrapperWorld.h>
++#include <LibWeb/DOM/Document.h>
++#include <LibWeb/HTML/Scripting/ClassicScript.h>
++#include <LibWeb/HTML/Scripting/Environments.h>
++#include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
++#include <LibWeb/HTML/Window.h>
++#include <LibWeb/Internals/ExtensionBridge.h>
++#include <LibWeb/Page/Page.h>
++#include <LibWeb/WebIDL/AbstractOperations.h>
++
++namespace Web::Internals {
++
++GC_DEFINE_ALLOCATOR(ExtensionBridge);
++
++GC::Ref<ExtensionBridge> ExtensionBridge::create(HTML::Window& window, String extension_id)
++{
++    return GC::Heap::the().allocate<ExtensionBridge>(window, move(extension_id));
++}
++
++ExtensionBridge::ExtensionBridge(HTML::Window& window, String extension_id)
++    : InternalsBase(window)
++    , m_extension_id(move(extension_id))
++{
++}
++
++ExtensionBridge::~ExtensionBridge() = default;
++
++void ExtensionBridge::visit_edges(GC::Cell::Visitor& visitor)
++{
++    Base::visit_edges(visitor);
++    visitor.visit(m_message_handler);
++    for (auto& [id, promise] : m_pending_calls)
++        visitor.visit(promise);
++}
++
++bool ExtensionBridge::is_extension_origin(URL::Origin const& origin)
++{
++    if (origin.is_opaque())
++        return false;
++    auto const& scheme = origin.scheme();
++    return scheme.has_value() && (*scheme == "chrome-extension"sv || *scheme == "moz-extension"sv);
++}
++
++void ExtensionBridge::install_for_extension_page(JS::Realm& realm, HTML::Window& window)
++{
++    static auto const property_name = "__cgxBridge"_utf16_fly_string;
++    auto bridge = create(window, String {});
++    window.associated_document().set_extension_bridge(String {}, bridge);
++    realm.global_object().define_direct_property(property_name, Bindings::wrap(Bindings::host_defined_wrapper_world(realm), realm, bridge), JS::Attribute::Configurable | JS::Attribute::Writable);
++}
++
++void ExtensionBridge::inject_content_scripts(DOM::Document& document)
++{
++    // Extension pages have their own bridge; only web documents (and local files) get content scripts.
++    auto const& scheme = document.url().scheme();
++    if (!scheme.is_one_of("http"sv, "https"sv, "file"sv) || is_extension_origin(document.origin()))
++        return;
++    auto window = document.window();
++    if (!window)
++        return;
++
++    auto programs_json = document.page().client().page_did_request_content_script_programs(document.id());
++    if (!programs_json.has_value() || programs_json->is_empty() || *programs_json == "[]"sv)
++        return;
++    auto programs = JsonValue::from_string(*programs_json);
++    if (programs.is_error() || !programs.value().is_array())
++        return;
++
++    auto& settings = document.relevant_settings_object();
++    auto& realm = settings.realm();
++    auto& vm = realm.vm();
++
++    programs.value().as_array().for_each([&](JsonValue const& entry) {
++        if (!entry.is_object())
++            return;
++        auto extension_id = entry.as_object().get_string("extensionId"sv);
++        auto program = entry.as_object().get_string("program"sv);
++        if (!extension_id.has_value() || !program.has_value() || document.extension_bridge(*extension_id))
++            return;
++
++        auto bridge = create(*window, *extension_id);
++        document.set_extension_bridge(*extension_id, bridge);
++
++        // The program is a function expression; evaluating it yields the function to call with the bridge. Running it as
++        // a classic script of the document does not go through the page's CSP, which governs the page's own scripts.
++        auto filename = ByteString::formatted("extension://{}/content-scripts", *extension_id);
++        auto script = HTML::ClassicScript::create(filename, Utf16String::from_utf8(*program), settings, document.url());
++        auto completion = script->run(HTML::ClassicScript::RethrowErrors::No);
++        if (completion.is_error() || !completion.value().is_function()) {
++            dbgln("Content scripts of extension {} could not be set up", *extension_id);
++            return;
++        }
++
++        HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
++        auto bridge_value = Bindings::wrap(Bindings::host_defined_wrapper_world(realm), realm, bridge);
++        auto result = JS::call(vm, completion.value().as_function(), JS::js_undefined(), bridge_value);
++        if (result.is_error())
++            dbgln("Content scripts of extension {} threw while starting", *extension_id);
++    });
++}
++
++void ExtensionBridge::run_content_script_stage(DOM::Document& document, StringView stage)
++{
++    auto message = MUST(String::formatted("{{\"kind\":\"run\",\"stage\":\"{}\"}}", stage));
++    for (auto const& bridge : document.content_script_bridges())
++        bridge->deliver(message);
++}
++
++HTML::CrossProcessId ExtensionBridge::document_id() const
++{
++    return window().associated_document().id();
++}
++
++Utf16String ExtensionBridge::context_init()
++{
++    auto json = page().client().page_did_request_extension_context_init(document_id(), m_extension_id);
++    return Utf16String::from_utf8(json.value_or("null"_string));
++}
++
++GC::Ref<WebIDL::Promise> ExtensionBridge::call(Utf16String const& name, Utf16String const& args_json)
++{
++    auto promise = WebIDL::create_promise_for(window());
++    auto request_id = m_next_request_id++;
++    m_pending_calls.set(request_id, promise);
++    page().client().page_did_call_extension_api(document_id(), m_extension_id, request_id, name.to_utf8(), args_json.to_utf8());
++    return promise;
++}
++
++Utf16String ExtensionBridge::call_sync(Utf16String const& name, Utf16String const& args_json)
++{
++    auto result = page().client().page_did_call_extension_api_sync(document_id(), m_extension_id, name.to_utf8(), args_json.to_utf8());
++    return Utf16String::from_utf8(result.value_or(String {}));
++}
++
++void ExtensionBridge::set_message_handler(WebIDL::CallbackType& handler)
++{
++    m_message_handler = &handler;
++}
++
++void ExtensionBridge::complete_call(u64 request_id, bool ok, String const& json)
++{
++    auto promise = m_pending_calls.take(request_id);
++    if (!promise.has_value())
++        return;
++
++    auto& realm = (*promise)->promise()->shape().realm();
++    HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
++    if (ok)
++        WebIDL::resolve_promise(realm, *promise, JS::PrimitiveString::create(realm.vm(), Utf16String::from_utf8(json)));
++    else
++        WebIDL::reject_promise(realm, *promise, JS::Error::create(realm, Utf16String::from_utf8(json)));
++}
++
++void ExtensionBridge::deliver(String const& json)
++{
++    if (!m_message_handler)
++        return;
++    auto& realm = m_message_handler->associated_realm();
++    HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
++    JS::Value argument = JS::PrimitiveString::create(realm.vm(), Utf16String::from_utf8(json));
++    (void)WebIDL::invoke_callback(*m_message_handler, {}, WebIDL::ExceptionBehavior::Report, { &argument, 1 });
++}
++
++}
+diff --git a/Libraries/LibWeb/Internals/ExtensionBridge.h b/Libraries/LibWeb/Internals/ExtensionBridge.h
+new file mode 100644
+index 00000000..d567e4a0
+--- /dev/null
++++ b/Libraries/LibWeb/Internals/ExtensionBridge.h
+@@ -0,0 +1,68 @@
++/*
++ * Copyright (c) 2026, cgx-webext contributors
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++#include <AK/HashMap.h>
++#include <AK/String.h>
++#include <AK/Utf16String.h>
++#include <LibGC/Ptr.h>
++#include <LibWeb/Export.h>
++#include <LibWeb/Forward.h>
++#include <LibWebCommon/HTML/CrossProcessId.h>
++#include <LibWeb/Internals/InternalsBase.h>
++#include <LibWeb/WebIDL/CallbackType.h>
++#include <LibWeb/WebIDL/Promise.h>
++
++namespace Web::Internals {
++
++// AD-HOC (cgx-webext): Connects extension JavaScript to the extension core in the browser process.
++//
++// An extension's own pages (background page, popup, options) get one as `__cgxBridge`, which Shim/boot.js consumes.
++// Content scripts get one per extension that is handed to their program as an argument and is never put on the page's
++// global object. The browser process decides what each bridge may do; nothing the renderer says is trusted there.
++class WEB_API ExtensionBridge final : public InternalsBase {
++    WEB_WRAPPABLE(ExtensionBridge, InternalsBase);
++    GC_DECLARE_ALLOCATOR(ExtensionBridge);
++
++public:
++    // `extension_id` is empty for an extension's own page.
++    static GC::Ref<ExtensionBridge> create(HTML::Window&, String extension_id);
++    virtual ~ExtensionBridge() override;
++
++    static bool is_extension_origin(URL::Origin const&);
++    // Defines `__cgxBridge` for an extension's own page.
++    static void install_for_extension_page(JS::Realm&, HTML::Window&);
++    // Runs the content scripts of every extension that match the document. Called when it may first run script, before
++    // its parser starts, which is when `document_start` scripts run.
++    static void inject_content_scripts(DOM::Document&);
++    // Tells the content scripts of the document that a later stage ("document_end", "document_idle") was reached.
++    static void run_content_script_stage(DOM::Document&, StringView stage);
++
++    Utf16String context_init();
++    GC::Ref<WebIDL::Promise> call(Utf16String const& name, Utf16String const& args_json);
++    Utf16String call_sync(Utf16String const& name, Utf16String const& args_json);
++    void set_message_handler(WebIDL::CallbackType& handler);
++
++    // From the browser process.
++    void complete_call(u64 request_id, bool ok, String const& json);
++    void deliver(String const& json);
++
++    String const& extension_id() const { return m_extension_id; }
++
++private:
++    ExtensionBridge(HTML::Window&, String extension_id);
++    virtual void visit_edges(GC::Cell::Visitor&) override;
++
++    HTML::CrossProcessId document_id() const;
++
++    String m_extension_id;
++    GC::Ptr<WebIDL::CallbackType> m_message_handler;
++    HashMap<u64, GC::Ref<WebIDL::Promise>> m_pending_calls;
++    u64 m_next_request_id { 1 };
++};
++
++}
+diff --git a/Libraries/LibWeb/Internals/ExtensionBridge.idl b/Libraries/LibWeb/Internals/ExtensionBridge.idl
+new file mode 100644
+index 00000000..d1723a60
+--- /dev/null
++++ b/Libraries/LibWeb/Internals/ExtensionBridge.idl
+@@ -0,0 +1,11 @@
++// AD-HOC (cgx-webext): Connects the JavaScript of a browser extension's own pages (background page, popup, options page)
++// to the extension core in the browser process. Only documents with an extension origin get one.
++callback ExtensionBridgeMessageHandler = undefined (DOMString message);
++
++[Exposed=Nobody]
++interface ExtensionBridge {
++    DOMString contextInit();
++    Promise<DOMString> call(DOMString name, DOMString argsJson);
++    DOMString callSync(DOMString name, DOMString argsJson);
++    undefined setMessageHandler(ExtensionBridgeMessageHandler handler);
++};
+diff --git a/Libraries/LibWeb/Page/Page.h b/Libraries/LibWeb/Page/Page.h
+index 02d2000e..2aaae8b3 100644
+--- a/Libraries/LibWeb/Page/Page.h
++++ b/Libraries/LibWeb/Page/Page.h
+@@ -718,6 +718,14 @@ private:
+     bool m_processing_fullscreen_operations { false };
+ };
+ 
++// AD-HOC (cgx-webext): A file of a browser extension, as served by the browser process.
++struct ExtensionResource {
++    u16 status { 0 };
++    String mime_type;
++    Optional<String> content_security_policy;
++    ByteBuffer body;
++};
++
+ class WEB_API PageClient : public JS::Cell {
+     GC_CELL(PageClient, JS::Cell);
+ 
+@@ -882,6 +890,12 @@ public:
+     virtual void page_did_remove_blob_url_entries(HTML::EnvironmentSettingsObject const&, [[maybe_unused]] Vector<Utf16String> const& urls) { }
+     virtual void page_did_retain_blob_url_token([[maybe_unused]] HTML::CrossProcessId navigable_id, [[maybe_unused]] URL::BlobURLEntry::Token token) { }
+     virtual Optional<FileAPI::SerializedBlobURLEntry> page_did_request_blob_url_entry([[maybe_unused]] Utf16String const& url, [[maybe_unused]] Optional<URL::BlobURLEntry::Token> token) { return {}; }
++    virtual Optional<ExtensionResource> page_did_request_extension_resource([[maybe_unused]] URL::URL const& url, [[maybe_unused]] ByteString const& initiator_origin) { return {}; }
++    // `extension_id` is empty for an extension's own page and names the extension for its content scripts in a web page.
++    virtual Optional<String> page_did_request_extension_context_init([[maybe_unused]] HTML::CrossProcessId document_id, [[maybe_unused]] String const& extension_id) { return {}; }
++    virtual void page_did_call_extension_api([[maybe_unused]] HTML::CrossProcessId document_id, [[maybe_unused]] String const& extension_id, [[maybe_unused]] u64 request_id, [[maybe_unused]] String const& name, [[maybe_unused]] String const& args_json) { }
++    virtual Optional<String> page_did_call_extension_api_sync([[maybe_unused]] HTML::CrossProcessId document_id, [[maybe_unused]] String const& extension_id, [[maybe_unused]] String const& name, [[maybe_unused]] String const& args_json) { return {}; }
++    virtual Optional<String> page_did_request_content_script_programs([[maybe_unused]] HTML::CrossProcessId document_id) { return {}; }
+     virtual void page_did_update_indexed_database([[maybe_unused]] String const& url, [[maybe_unused]] IndexedDB::TransactionChanges const&) { }
+     virtual void page_did_update_resource_count(i32) { }
+     struct NewWebViewResult {
+diff --git a/Libraries/LibWeb/idl_files.cmake b/Libraries/LibWeb/idl_files.cmake
+index 664aed60..63dbfa77 100644
+--- a/Libraries/LibWeb/idl_files.cmake
++++ b/Libraries/LibWeb/idl_files.cmake
+@@ -410,6 +410,7 @@ libweb_js_bindings(Internals/InternalAnimationTimeline)
+ libweb_js_bindings(Internals/InternalGamepad)
+ libweb_js_bindings(Internals/Internals)
+ libweb_js_bindings(Internals/WebUI)
++libweb_js_bindings(Internals/ExtensionBridge)
+ libweb_js_bindings(IntersectionObserver/IntersectionObserver)
+ libweb_js_bindings(IntersectionObserver/IntersectionObserverEntry)
+ libweb_js_bindings(LargestContentfulPaint/LargestContentfulPaint)
+diff --git a/Libraries/LibWebCommon/Fetch/Infrastructure/URL.h b/Libraries/LibWebCommon/Fetch/Infrastructure/URL.h
+index 5652da52..739843ad 100644
+--- a/Libraries/LibWebCommon/Fetch/Infrastructure/URL.h
++++ b/Libraries/LibWebCommon/Fetch/Infrastructure/URL.h
+@@ -32,7 +32,10 @@ inline constexpr Array FETCH_SCHEMES = {
+     "about"sv, "blob"sv, "data"sv, "file"sv, "http"sv, "https"sv,
+ 
+     // AD-HOC: Internal fetch schemes:
+-    "resource"sv
++    "resource"sv,
++
++    // AD-HOC (cgx-webext): Pages and files of browser extensions, served by the browser process.
++    "chrome-extension"sv, "moz-extension"sv
+ };
+ 
+ [[nodiscard]] WEBCOMMON_API bool is_local_url(URL::URL const&);
+diff --git a/Libraries/LibWebCommon/Loader/SiteCompatibility.cpp b/Libraries/LibWebCommon/Loader/SiteCompatibility.cpp
+index 781a410c..a1afb5cd 100644
+--- a/Libraries/LibWebCommon/Loader/SiteCompatibility.cpp
++++ b/Libraries/LibWebCommon/Loader/SiteCompatibility.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <AK/JsonArray.h>
+ #include <AK/JsonObject.h>
++#include <AK/Platform.h>
+ #include <AK/StringBuilder.h>
+ #include <LibWebCommon/Loader/SiteCompatibility.h>
+ 
+@@ -47,6 +48,8 @@ static ErrorOr<Vector<UserAgentTransformation>> parse_user_agent_transformations
+             return Error::from_string_literal("User-Agent transformations must be strings");
+         if (transformation.as_string() == "hide_Ladybird"sv)
+             TRY(result.try_append(UserAgentTransformation::HideLadybird));
++        else if (transformation.as_string() == "as_Firefox"sv)
++            TRY(result.try_append(UserAgentTransformation::AsFirefox));
+         else
+             return Error::from_string_literal("Unknown User-Agent transformation");
+     }
+@@ -145,6 +148,20 @@ static String remove_ladybird_product(StringView user_agent)
+     return MUST(builder.to_string());
+ }
+ 
++// The User-Agent string of a current Firefox on this platform.
++static StringView firefox_user_agent()
++{
++#if defined(AK_OS_MACOS) || defined(AK_OS_IOS)
++    return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:156.0) Gecko/20100101 Firefox/156.0"sv;
++#elif defined(AK_OS_ANDROID)
++    return "Mozilla/5.0 (Android 13; Mobile; rv:156.0) Gecko/156.0 Firefox/156.0"sv;
++#elif defined(AK_OS_WINDOWS)
++    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0"sv;
++#else
++    return "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0"sv;
++#endif
++}
++
+ String SiteCompatibilityRule::apply_user_agent_transformations(StringView user_agent) const
+ {
+     auto transformed_user_agent = MUST(String::from_utf8(user_agent));
+@@ -153,6 +170,9 @@ String SiteCompatibilityRule::apply_user_agent_transformations(StringView user_a
+         case UserAgentTransformation::HideLadybird:
+             transformed_user_agent = remove_ladybird_product(transformed_user_agent);
+             break;
++        case UserAgentTransformation::AsFirefox:
++            transformed_user_agent = MUST(String::from_utf8(firefox_user_agent()));
++            break;
+         }
+     }
+     return transformed_user_agent;
+diff --git a/Libraries/LibWebCommon/Loader/SiteCompatibility.h b/Libraries/LibWebCommon/Loader/SiteCompatibility.h
+index af7059cb..629b41f8 100644
+--- a/Libraries/LibWebCommon/Loader/SiteCompatibility.h
++++ b/Libraries/LibWebCommon/Loader/SiteCompatibility.h
+@@ -18,6 +18,8 @@ namespace Web {
+ 
+ enum class UserAgentTransformation : u8 {
+     HideLadybird,
++    // AD-HOC (cgx-webext): Present as Firefox, for addons.mozilla.org, which only offers its add-ons to Firefox.
++    AsFirefox,
+ };
+ 
+ class WEBCOMMON_API SiteCompatibilityRule {
+diff --git a/Libraries/LibWebView/Application.cpp b/Libraries/LibWebView/Application.cpp
+index bdfb7acb..5c12bb15 100644
+--- a/Libraries/LibWebView/Application.cpp
++++ b/Libraries/LibWebView/Application.cpp
+@@ -47,6 +47,11 @@
+ #include <LibWebCommon/WebDriver/TimeoutsConfiguration.h>
+ #include <LibWebCommon/WebView/SiteIsolation.h>
+ #include <LibWebView/Application.h>
++#if defined(ENABLE_WEBEXT)
++#    include <LibWebView/Extensions/ApplicationExtensionDelegate.h>
++#    include <LibWebView/Extensions/ExtensionManager.h>
++#    include <LibWebView/Extensions/StoreInstaller.h>
++#endif
+ #include <LibWebView/AutocompleteService.h>
+ #include <LibWebView/BlobURLStore.h>
+ #include <LibWebView/CompositorClient.h>
+@@ -242,6 +247,130 @@ Application::Application(Optional<ByteString> ladybird_binary_path)
+     platform_init(move(ladybird_binary_path));
+ }
+ 
++#if defined(ENABLE_WEBEXT)
++void Application::initialize_extensions()
++{
++    m_extension_delegate = make<ApplicationExtensionDelegate>(LexicalPath::join(profile().paths().data, "Extensions"sv).string());
++    m_extension_manager = ExtensionManager::create(*m_extension_delegate);
++    m_extension_delegate->set_manager(*m_extension_manager);
++
++    // Extensions installed from the Chrome Web Store or addons.mozilla.org, kept in the profile.
++    m_store_installer = make<StoreInstaller>(*m_extension_manager, LexicalPath::join(profile().paths().data, "ExtensionPackages"sv).string());
++    m_store_installer->on_installed = [this](ByteString const& id, bool is_update) {
++        stop_extension_background_page(id);
++        start_extension_background_page(id, is_update ? ExtensionStartReason::Update : ExtensionStartReason::Install);
++    };
++    m_store_installer->on_uninstalled = [this](ByteString const& id) {
++        stop_extension_background_page(id);
++        m_extension_delegate->remove_extension_data(id);
++    };
++    m_kept_extension_ids = m_store_installer->load_installed_packages();
++
++    for (auto const& path : m_browser_options.extension_paths) {
++        ErrorOr<Variant<ExtensionManager::InstalledExtension, ExtensionManager::InstallFailure>> result = Error::from_string_literal("unreachable");
++
++        if (FileSystem::is_directory(path)) {
++            result = m_extension_manager->install_directory(path, {}, "auto"sv);
++        } else {
++            auto file = Core::File::open(path, Core::File::OpenMode::Read);
++            auto contents = file.is_error() ? ErrorOr<ByteBuffer> { file.release_error() } : file.value()->read_until_eof();
++            if (contents.is_error()) {
++                warnln("Could not read extension '{}': {}", path, contents.error());
++                continue;
++            }
++            result = m_extension_manager->install_package(contents.value().bytes(), {}, "auto"sv);
++        }
++
++        if (result.is_error()) {
++            warnln("Could not load extension '{}': {}", path, result.error());
++            continue;
++        }
++
++        result.value().visit(
++            [&](ExtensionManager::InstalledExtension const& extension) {
++                outln("Loaded extension: {} {} at {}", extension.display_name, extension.version, extension.base_url);
++                m_loaded_extension_ids.append(extension.id.to_byte_string());
++            },
++            [&](ExtensionManager::InstallFailure const& failure) {
++                warnln("Could not load extension '{}': {}", path, failure.message);
++            });
++    }
++}
++#endif
++
++#if defined(ENABLE_WEBEXT)
++// Background pages run in hidden views. They start once the event loop runs, when the processes they need are up.
++void Application::start_extension_background_pages()
++{
++    if (!m_extension_manager)
++        return;
++
++    for (auto const& id : m_kept_extension_ids) {
++        // --load-extension of the same extension wins.
++        if (!m_loaded_extension_ids.contains_slow(id))
++            start_extension_background_page(id, ExtensionStartReason::Startup);
++    }
++    for (auto const& id : m_loaded_extension_ids)
++        start_extension_background_page(id, ExtensionStartReason::Install);
++}
++
++void Application::start_extension_background_page(ByteString const& id, ExtensionStartReason reason)
++{
++    if (!m_extension_manager || m_extension_background_views.contains(id))
++        return;
++    auto url_string = m_extension_manager->background_url(id);
++    if (!url_string.has_value()) {
++        if (reason != ExtensionStartReason::Startup)
++            m_extension_manager->notify_installed(id, reason == ExtensionStartReason::Update ? "update"sv : "install"sv);
++        return;
++    }
++    auto url = URL::Parser::basic_parse(*url_string);
++    if (!url.has_value()) {
++        warnln("Extensions: invalid background URL {}", *url_string);
++        return;
++    }
++
++    auto theme_path = LexicalPath::join(WebView::s_ladybird_resource_root, "themes"sv, "Default.ini"sv);
++    auto theme = Gfx::load_system_theme(theme_path.string());
++    if (theme.is_error()) {
++        warnln("Extensions: cannot load the theme for background pages: {}", theme.error());
++        return;
++    }
++
++    auto view = HeadlessWebView::create(theme.value(), { 800, 600 });
++    // The background page's listeners must exist before the install and startup events fire.
++    view->on_load_finish = [this, id, reason, fired = false](URL::URL const&) mutable {
++        if (exchange(fired, true))
++            return;
++        if (reason != ExtensionStartReason::Startup)
++            m_extension_manager->notify_installed(id, reason == ExtensionStartReason::Update ? "update"sv : "install"sv);
++        if (reason == ExtensionStartReason::Startup || (reason == ExtensionStartReason::Install && m_loaded_extension_ids.contains_slow(id)))
++            m_extension_manager->notify_startup(id);
++    };
++    view->load(*url);
++    dbgln("Extensions: started background page {}", *url_string);
++    m_extension_background_views.set(id, move(view));
++}
++
++void Application::stop_extension_background_page(ByteString const& id)
++{
++    m_extension_background_views.remove(id);
++}
++
++void Application::display_extension_prompt(ExtensionPrompt const& prompt, Function<void(bool)> on_answer) const
++{
++    if (m_browser_options.auto_accept_extension_prompts) {
++        outln("Extensions: {} (accepted by --auto-accept-extension-prompts)", prompt.title);
++        for (auto const& detail : prompt.details)
++            outln("    - {}", detail);
++        on_answer(true);
++        return;
++    }
++    warnln("Extensions: {} Declined: this browser has no window to ask in (pass --auto-accept-extension-prompts to accept).", prompt.title);
++    on_answer(false);
++}
++#endif
++
+ Application::~Application()
+ {
+ #if !defined(AK_OS_WINDOWS)
+@@ -286,6 +415,13 @@ Application::~Application()
+ 
+     PictureInPictureManager::the().destroy_all_windows();
+ 
++#if defined(ENABLE_WEBEXT)
++    // Views talk to the application while they close, so they go while it is still whole. Store installs in flight would
++    // start views, so they go first.
++    m_store_installer = nullptr;
++    m_extension_background_views.clear();
++#endif
++
+     // Connection die() handlers use the process manager, so destroy the processes while it is still reachable.
+     if (m_process_manager)
+         m_process_manager->remove_all_processes();
+@@ -397,9 +533,16 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
+     bool disable_scrollbar_painting = false;
+     bool file_scheme_urls_have_tuple_origins = false;
+ 
++    Vector<ByteString> extension_paths;
++    bool auto_accept_extension_prompts = false;
++
+     Core::ArgsParser args_parser;
+     args_parser.set_general_help("The Ladybird web browser :^)");
+     args_parser.add_positional_argument(raw_urls, "URLs to open", "url", Core::ArgsParser::Required::No);
++#if defined(ENABLE_WEBEXT)
++    args_parser.add_option(extension_paths, "Load an extension: an unpacked directory or a .crx/.xpi/.zip file. May be given more than once.", "load-extension", 0, "path");
++    args_parser.add_option(auto_accept_extension_prompts, "Accept extension install and removal prompts without asking (for automated tests)", "auto-accept-extension-prompts");
++#endif
+ 
+     args_parser.add_option(Core::ArgsParser::Option {
+         .argument_mode = Core::ArgsParser::OptionArgumentMode::Optional,
+@@ -585,6 +728,8 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
+         site_isolation_mode = SiteIsolationMode::Disabled;
+ 
+     m_browser_options = {
++        .extension_paths = move(extension_paths),
++        .auto_accept_extension_prompts = auto_accept_extension_prompts,
+         .urls = {},
+         .raw_urls = move(raw_urls),
+         .headless_mode = headless_mode,
+@@ -678,6 +823,9 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
+ 
+     m_settings = make<Settings>(Settings::create(LexicalPath::join(profile().paths().config, "Settings.json"sv).string(), move(platform_languages)));
+     m_bookmark_store = make<BookmarkStore>(BookmarkStore::create(LexicalPath::join(profile().paths().config, "Bookmarks.json"sv).string()));
++#if defined(ENABLE_WEBEXT)
++    initialize_extensions();
++#endif
+ 
+     if (m_web_content_options.is_test_mode == IsTestMode::Yes) {
+         TRY(m_settings->complete_first_run());
+@@ -729,6 +877,11 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
+         m_stats_log->start_sampling();
+     TRY(launch_services());
+ 
++#if defined(ENABLE_WEBEXT)
++    // Background pages need the services and run once the event loop does.
++    Core::deferred_invoke([this] { start_extension_background_pages(); });
++#endif
++
+     if (m_browser_options.enable_content_blocker == EnableContentBlocker::Yes) {
+         m_content_blocker_list_update_timer = Core::Timer::create_repeating(AK::Duration::from_seconds(24 * 60 * 60), [this] {
+             start_content_blocker_list_update(ContentBlockerListUpdateTrigger::Automatic);
+diff --git a/Libraries/LibWebView/Application.h b/Libraries/LibWebView/Application.h
+index 9afbd273..2142b2bf 100644
+--- a/Libraries/LibWebView/Application.h
++++ b/Libraries/LibWebView/Application.h
+@@ -79,6 +79,10 @@ namespace WebView {
+ struct ApplicationSettingsObserver;
+ struct ApplicationPermissionManagerObserver;
+ struct ApplicationBookmarkStoreObserver;
++class ApplicationExtensionDelegate;
++class ExtensionManager;
++class HeadlessWebView;
++class StoreInstaller;
+ 
+ class WEBVIEW_API Application : public DevTools::DevToolsDelegate {
+     AK_MAKE_NONCOPYABLE(Application);
+@@ -178,6 +182,22 @@ public:
+     Web::NavigatorCompatibilityMode navigator_compatibility_mode() const;
+ 
+     static BookmarkStore& bookmark_store() { return *the().m_bookmark_store; }
++#if defined(ENABLE_WEBEXT)
++    // Null if extension support could not start, or once the application is shutting down (pages and views are destroyed
++    // after it, and must not reach for it then).
++    static ExtensionManager* extension_manager() { return s_the ? s_the->m_extension_manager.ptr() : nullptr; }
++    static StoreInstaller* store_installer() { return s_the ? s_the->m_store_installer.ptr() : nullptr; }
++
++    // A yes/no question about installing or removing an extension, asked by the browser (not by a page).
++    struct ExtensionPrompt {
++        String title;
++        String message;
++        Vector<String> details;
++        String accept_label;
++    };
++    // Calls `on_answer` exactly once. Without a UI (headless) the answer is no, unless --auto-accept-extension-prompts.
++    virtual void display_extension_prompt(ExtensionPrompt const&, Function<void(bool)> on_answer) const;
++#endif
+     void update_bookmark_action_for_current_web_view();
+     void update_actions_for_active_web_view();
+     void bookmarks_changed(Badge<ApplicationBookmarkStoreObserver>);
+@@ -450,6 +470,17 @@ protected:
+     explicit Application(Optional<ByteString> ladybird_binary_path = {});
+ 
+     ErrorOr<void> initialize(Main::Arguments const&);
++#if defined(ENABLE_WEBEXT)
++    void initialize_extensions();
++    void start_extension_background_pages();
++    enum class ExtensionStartReason {
++        Startup,   // Loaded from the profile.
++        Install,   // --load-extension, or freshly installed from a store.
++        Update,    // Replaced an installed version.
++    };
++    void start_extension_background_page(ByteString const& extension_id, ExtensionStartReason);
++    void stop_extension_background_page(ByteString const& extension_id);
++#endif
+ 
+     virtual void process_did_exit(Process&&, Optional<int> exit_status);
+ 
+@@ -631,6 +662,16 @@ private:
+     RefPtr<Core::Timer> m_permission_expiry_timer;
+ 
+     OwnPtr<BookmarkStore> m_bookmark_store;
++#if defined(ENABLE_WEBEXT)
++    OwnPtr<ApplicationExtensionDelegate> m_extension_delegate;
++    OwnPtr<ExtensionManager> m_extension_manager;
++    // Hidden views hosting extensions' background pages; not tabs, and never shown.
++    HashMap<ByteString, NonnullOwnPtr<HeadlessWebView>> m_extension_background_views;
++    OwnPtr<StoreInstaller> m_store_installer;
++    // Extensions to start once the event loop runs, and why.
++    Vector<ByteString> m_loaded_extension_ids;
++    Vector<ByteString> m_kept_extension_ids;
++#endif
+     OwnPtr<ApplicationBookmarkStoreObserver> m_bookmark_store_observer;
+ 
+     OwnPtr<AutocompleteService> m_autocomplete_service;
+diff --git a/Libraries/LibWebView/CMakeLists.txt b/Libraries/LibWebView/CMakeLists.txt
+index 65784c2c..903bb012 100644
+--- a/Libraries/LibWebView/CMakeLists.txt
++++ b/Libraries/LibWebView/CMakeLists.txt
+@@ -169,8 +169,19 @@ add_custom_command(
+ )
+ add_custom_target(generate_build_information DEPENDS ${build_information_stamp})
+ 
++if (ENABLE_WEBEXT)
++    # Extensions/ExtensionManager.* are copied in by cgx-webext's Integration/ladybird/apply.sh.
++    list(APPEND SOURCES Extensions/ApplicationExtensionDelegate.cpp Extensions/ExtensionManager.cpp Extensions/StoreInstaller.cpp)
++endif()
++
+ ladybird_lib(LibWebView webview EXPLICIT_SYMBOL_EXPORT)
+ add_dependencies(LibWebView generate_build_information)
++
++if (ENABLE_WEBEXT)
++    target_link_libraries(LibWebView PRIVATE WebExt::WebExt)
++    # PUBLIC: LibWebView headers have members that exist only with extension support, so every user must agree.
++    target_compile_definitions(LibWebView PUBLIC ENABLE_WEBEXT)
++endif()
+ target_link_libraries(LibWebView PUBLIC LibCompositing LibSandbox LibWebCommon)
+ target_link_libraries(LibWebView PRIVATE LibCore LibCrypto LibDatabase LibDevTools LibFileSystem LibGfx LibHTTP LibImageDecoderClient LibIPC LibRequests LibMedia LibMediaClient LibUnicode LibURL LibTextCodec LibThreading SDL3::SDL3)
+ 
+diff --git a/Libraries/LibWebView/Extensions/ApplicationExtensionDelegate.cpp b/Libraries/LibWebView/Extensions/ApplicationExtensionDelegate.cpp
+new file mode 100644
+index 00000000..d2c865ab
+--- /dev/null
++++ b/Libraries/LibWebView/Extensions/ApplicationExtensionDelegate.cpp
+@@ -0,0 +1,122 @@
++/*
++ * Copyright (c) 2026, cgx-webext contributors
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#if defined(ENABLE_WEBEXT)
++
++#    include <AK/CharacterTypes.h>
++#    include <AK/JsonArray.h>
++#    include <AK/JsonObject.h>
++#    include <AK/JsonValue.h>
++#    include <AK/LexicalPath.h>
++#    include <AK/StringBuilder.h>
++#    include <LibFileSystem/FileSystem.h>
++#    include <LibWebView/Extensions/ApplicationExtensionDelegate.h>
++#    include <LibWebView/Utilities.h>
++#    include <LibWebView/WebContentPage.h>
++
++namespace WebView {
++
++// Extension ids and storage keys come from the extension, so they must not be able to name another path.
++static ByteString sanitize_path_component(StringView component)
++{
++    StringBuilder builder;
++    for (auto character : component)
++        builder.append(is_ascii_alphanumeric(character) || character == '.' || character == '-' || character == '_' ? character : '_');
++    auto sanitized = builder.to_byte_string();
++    if (sanitized.is_empty() || sanitized == "."sv || sanitized == ".."sv)
++        return "_"sv;
++    return sanitized;
++}
++
++ApplicationExtensionDelegate::ApplicationExtensionDelegate(ByteString data_directory)
++    : m_data_directory(move(data_directory))
++{
++}
++
++ByteString ApplicationExtensionDelegate::path_for(StringView extension_id, StringView key) const
++{
++    return LexicalPath::join(m_data_directory, sanitize_path_component(extension_id), ByteString::formatted("{}.json", sanitize_path_component(key))).string();
++}
++
++Optional<ByteString> ApplicationExtensionDelegate::read_extension_data(StringView extension_id, StringView key)
++{
++    auto path = path_for(extension_id, key);
++    if (!FileSystem::exists(path))
++        return {};
++
++    auto json = read_json_file(path);
++    if (json.is_error()) {
++        warnln("Unable to read extension data '{}': {}", path, json.error());
++        return {};
++    }
++    return json.value().serialized().to_byte_string();
++}
++
++void ApplicationExtensionDelegate::write_extension_data(StringView extension_id, StringView key, StringView json)
++{
++    auto value = JsonValue::from_string(json);
++    if (value.is_error()) {
++        warnln("Refusing to persist invalid JSON for extension data '{}'/'{}'", extension_id, key);
++        return;
++    }
++
++    auto path = path_for(extension_id, key);
++    if (auto result = write_json_file(path, value.value()); result.is_error())
++        warnln("Unable to persist extension data '{}': {}", path, result.error());
++}
++
++void ApplicationExtensionDelegate::remove_extension_data(StringView extension_id)
++{
++    auto directory = LexicalPath::join(m_data_directory, sanitize_path_component(extension_id)).string();
++    if (!FileSystem::is_directory(directory))
++        return;
++    if (auto result = FileSystem::remove(directory, FileSystem::RecursionMode::Allowed); result.is_error())
++        warnln("Unable to remove extension data '{}': {}", directory, result.error());
++}
++
++void ApplicationExtensionDelegate::dispatch_event(StringView extension_id, StringView event, StringView args_json)
++{
++    JsonObject message;
++    message.set("kind"sv, "event"sv);
++    message.set("name"sv, MUST(String::from_utf8(event)));
++    auto args = JsonValue::from_string(args_json);
++    message.set("args"sv, args.is_error() ? JsonValue { JsonArray {} } : args.release_value());
++    deliver_event_to_extension(extension_id, message.serialized());
++}
++
++void ApplicationExtensionDelegate::deliver_to_context(u64 context_id, StringView envelope_json)
++{
++    // Envelopes from the message bus (ports, one-shot messages) for Shim/boot.js.
++    auto message = ByteString::formatted("{{\"kind\":\"envelope\",\"envelope\":{}}}", envelope_json);
++    deliver_to_extension_context(context_id, message);
++}
++
++void ApplicationExtensionDelegate::call_browser(StringView call_json, Function<void(ErrorOr<ByteString>)> reply)
++{
++    // TODO: tabs.*, windows.*, action.*, cookies.*, scripting.*, contextMenus.*.
++    dbgln_if(false, "extension: unimplemented browser call {}", call_json);
++    reply(Error::from_string_literal("This browser extension API is not implemented yet"));
++}
++
++void ApplicationExtensionDelegate::request_permissions(StringView, StringView, Function<void(bool)> reply)
++{
++    // TODO: Ask the user. Until there is UI, optional permissions are refused.
++    reply(false);
++}
++
++void ApplicationExtensionDelegate::schedule_alarm_check(i64 at_ms)
++{
++    auto delay = max<i64>(0, at_ms - now_ms());
++    m_alarm_timer = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(delay), [this] {
++        if (m_manager)
++            m_manager->tick();
++    });
++    m_alarm_timer->start();
++}
++
++}
++
++#endif
+diff --git a/Libraries/LibWebView/Extensions/ApplicationExtensionDelegate.h b/Libraries/LibWebView/Extensions/ApplicationExtensionDelegate.h
+new file mode 100644
+index 00000000..90b6bc28
+--- /dev/null
++++ b/Libraries/LibWebView/Extensions/ApplicationExtensionDelegate.h
+@@ -0,0 +1,49 @@
++/*
++ * Copyright (c) 2026, cgx-webext contributors
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++#if defined(ENABLE_WEBEXT)
++
++#    include <AK/ByteString.h>
++#    include <AK/RefPtr.h>
++#    include <LibCore/Timer.h>
++#    include <LibWebView/Extensions/ExtensionManager.h>
++
++namespace WebView {
++
++// Connects the extension core to the rest of the browser: persistence under the profile directory, the alarm timer, and
++// (as the integration grows) delivery of messages to extension pages and content scripts.
++class ApplicationExtensionDelegate final : public ExtensionManager::Delegate {
++    AK_ALLOC_WITH_KMALLOC;
++
++public:
++    explicit ApplicationExtensionDelegate(ByteString data_directory);
++
++    void set_manager(ExtensionManager& manager) { m_manager = &manager; }
++
++    virtual Optional<ByteString> read_extension_data(StringView extension_id, StringView key) override;
++    virtual void write_extension_data(StringView extension_id, StringView key, StringView json) override;
++    virtual void dispatch_event(StringView extension_id, StringView event, StringView args_json) override;
++    virtual void deliver_to_context(u64 context_id, StringView envelope_json) override;
++    virtual void call_browser(StringView call_json, Function<void(ErrorOr<ByteString>)> reply) override;
++    virtual void request_permissions(StringView extension_id, StringView request_json, Function<void(bool)> reply) override;
++    virtual void schedule_alarm_check(i64 at_ms) override;
++
++    // Deletes what the extension stored (storage areas, granted permissions), when it is uninstalled.
++    void remove_extension_data(StringView extension_id);
++
++private:
++    ByteString path_for(StringView extension_id, StringView key) const;
++
++    ByteString m_data_directory;
++    ExtensionManager* m_manager { nullptr };
++    RefPtr<Core::Timer> m_alarm_timer;
++};
++
++}
++
++#endif
+diff --git a/Libraries/LibWebView/Extensions/StoreInstaller.cpp b/Libraries/LibWebView/Extensions/StoreInstaller.cpp
+new file mode 100644
+index 00000000..01533724
+--- /dev/null
++++ b/Libraries/LibWebView/Extensions/StoreInstaller.cpp
+@@ -0,0 +1,625 @@
++/*
++ * Copyright (c) 2026, cgx-webext contributors
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#if defined(ENABLE_WEBEXT)
++
++#    include <AK/CharacterTypes.h>
++#    include <AK/JsonObject.h>
++#    include <AK/JsonValue.h>
++#    include <AK/LexicalPath.h>
++#    include <AK/ScopeGuard.h>
++#    include <AK/StringBuilder.h>
++#    include <LibCore/Directory.h>
++#    include <LibCore/EventLoop.h>
++#    include <LibCore/File.h>
++#    include <LibCore/System.h>
++#    include <LibCore/Timer.h>
++#    include <LibFileSystem/FileSystem.h>
++#    include <LibHTTP/HeaderList.h>
++#    include <LibRequests/NetworkError.h>
++#    include <LibRequests/Request.h>
++#    include <LibRequests/RequestClient.h>
++#    include <LibURL/Parser.h>
++#    include <LibWebCommon/Fetch/Infrastructure/HTTP/Statuses.h>
++#    include <LibWebCommon/Loader/UserAgent.h>
++#    include <LibWebView/Application.h>
++#    include <LibWebView/Extensions/ExtensionManager.h>
++#    include <LibWebView/Extensions/StoreInstaller.h>
++#    include <LibWebView/Utilities.h>
++#    include <LibWebView/WebContentPage.h>
++
++namespace WebView {
++
++// Store packages are a few megabytes; nothing a store serves comes near this.
++static constexpr size_t maximum_package_size = 256 * MiB;
++static constexpr u32 maximum_redirects = 10;
++
++struct StoreInstaller::Download {
++    AK_ALLOC_WITH_KMALLOC;
++    RefPtr<Requests::Request> request;
++    RefPtr<Core::Timer> timeout;
++};
++
++static constexpr auto download_timeout = AK::Duration::from_seconds(120);
++
++static String json_string(StringView value)
++{
++    return JsonValue { MUST(String::from_utf8(value)) }.serialized();
++}
++
++static StringView store_name(StringView store)
++{
++    return store == "chrome"sv ? "the Chrome Web Store"sv : "addons.mozilla.org"sv;
++}
++
++static ByteString store_page_key(StringView store)
++{
++    return ByteString::formatted("{}{}", ExtensionManager::store_bridge_key, store);
++}
++
++// File names come from extension ids, which come from packages: keep them to a safe alphabet.
++static ByteString file_name_for(StringView extension_id, StringView extension)
++{
++    StringBuilder builder;
++    builder.append('_');
++    for (auto character : extension_id)
++        builder.append(is_ascii_alphanumeric(character) || character == '.' || character == '-' || character == '_' || character == '@' ? character : '_');
++    builder.appendff(".{}", extension);
++    return builder.to_byte_string();
++}
++
++// The Chrome version Ladybird reports in its User-Agent string, which the Chrome Web Store uses to pick a package.
++static StringView reported_chrome_version()
++{
++    auto user_agent = Web::default_user_agent;
++    auto start = user_agent.find("Chrome/"sv);
++    if (!start.has_value())
++        return "153.0.0.0"sv;
++    auto version = user_agent.substring_view(*start + 7);
++    if (auto end = version.find(' '); end.has_value())
++        version = version.substring_view(0, *end);
++    return version;
++}
++
++static Optional<JsonObject> parse_object(StringView json)
++{
++    auto value = JsonValue::from_string(json);
++    if (value.is_error() || !value.value().is_object())
++        return {};
++    return value.value().as_object();
++}
++
++static Vector<String> warnings_of(JsonObject const& preview)
++{
++    Vector<String> warnings;
++    if (auto list = preview.get_array("warnings"sv); list.has_value()) {
++        list->for_each([&](JsonValue const& warning) {
++            if (warning.is_string())
++                warnings.append(warning.as_string());
++        });
++    }
++    return warnings;
++}
++
++static String string_arg(JsonArray const& args, size_t index)
++{
++    if (index >= args.size() || !args.at(index).is_string())
++        return {};
++    return args.at(index).as_string();
++}
++
++bool StoreInstaller::is_installed(StringView extension_id) const
++{
++    return !extension_id.is_empty() && m_manager.management_info(extension_id).has_value();
++}
++
++StoreInstaller::StoreInstaller(ExtensionManager& manager, ByteString data_directory)
++    : m_manager(manager)
++    , m_data_directory(move(data_directory))
++{
++}
++
++StoreInstaller::~StoreInstaller() = default;
++
++ByteString StoreInstaller::packages_directory() const
++{
++    return m_data_directory;
++}
++
++ByteString StoreInstaller::index_path() const
++{
++    return LexicalPath::join(m_data_directory, "index.json"sv).string();
++}
++
++void StoreInstaller::write_index() const
++{
++    JsonArray index;
++    for (auto const& kept : m_kept_packages) {
++        JsonObject entry;
++        entry.set("id"sv, MUST(String::from_byte_string(kept.extension_id)));
++        entry.set("file"sv, MUST(String::from_byte_string(kept.file_name)));
++        entry.set("store"sv, MUST(String::from_byte_string(kept.store)));
++        index.must_append(move(entry));
++    }
++    JsonObject root;
++    root.set("extensions"sv, move(index));
++    if (auto result = Core::Directory::create(m_data_directory, Core::Directory::CreateDirectories::Yes); result.is_error())
++        warnln("Extensions: cannot create {}: {}", m_data_directory, result.error());
++    if (auto result = write_json_file(index_path(), root); result.is_error())
++        warnln("Extensions: cannot write {}: {}", index_path(), result.error());
++}
++
++Vector<ByteString> StoreInstaller::load_installed_packages()
++{
++    Vector<ByteString> loaded;
++    if (!FileSystem::exists(index_path()))
++        return loaded;
++
++    auto index = read_json_file(index_path());
++    auto entries = index.is_error() ? Optional<JsonArray const&> {} : index.value().get_array("extensions"sv);
++    if (!entries.has_value()) {
++        warnln("Extensions: cannot read {}", index_path());
++        return loaded;
++    }
++
++    entries->for_each([&](JsonValue const& value) {
++        if (!value.is_object())
++            return;
++        auto id = value.as_object().get_string("id"sv);
++        auto file = value.as_object().get_string("file"sv);
++        auto store = value.as_object().get_string("store"sv).value_or("chrome"_string);
++        if (!id.has_value() || !file.has_value() || file->contains('/') || file->starts_with('.'))
++            return;
++
++        auto path = LexicalPath::join(packages_directory(), *file).string();
++        auto file_handle = Core::File::open(path, Core::File::OpenMode::Read);
++        auto contents = file_handle.is_error() ? ErrorOr<ByteBuffer> { file_handle.release_error() } : file_handle.value()->read_until_eof();
++        if (contents.is_error()) {
++            warnln("Extensions: cannot read {}: {}", path, contents.error());
++            return;
++        }
++        auto result = m_manager.install_package(contents.value().bytes(), {}, "auto"sv);
++        if (result.is_error() || !result.value().has<ExtensionManager::InstalledExtension>()) {
++            warnln("Extensions: the kept package {} no longer installs", path);
++            return;
++        }
++        auto const& installed = result.value().get<ExtensionManager::InstalledExtension>();
++        outln("Loaded extension: {} {} at {} (from {})", installed.display_name, installed.version, installed.base_url, store_name(store));
++        m_kept_packages.append({ installed.id.to_byte_string(), file->to_byte_string(), store.to_byte_string() });
++        loaded.append(installed.id.to_byte_string());
++    });
++    return loaded;
++}
++
++void StoreInstaller::download(URL::URL url, DownloadCallback callback, u32 redirects)
++{
++    if (url.scheme() != "https"sv) {
++        callback(Error::from_string_literal("Store packages are only downloaded over HTTPS"));
++        return;
++    }
++    auto client = Application::request_server_client();
++    if (client.is_error()) {
++        callback(Error::from_string_literal("Cannot reach the network service"));
++        return;
++    }
++
++    auto headers = HTTP::HeaderList::create();
++    headers->set({ "User-Agent"sv, Web::default_user_agent });
++    auto request = client.value()->start_request("GET"sv, url, *headers, {}, HTTP::CacheMode::NoStore, HTTP::Cookie::IncludeCredentials::No);
++    if (!request) {
++        callback(Error::from_string_literal("Cannot start the download"));
++        return;
++    }
++
++    auto download_id = m_next_download_id++;
++    // Exactly one of the response and the timeout answers.
++    struct Pending : RefCounted<Pending> {
++        DownloadCallback callback;
++    };
++    auto pending = adopt_ref(*new Pending);
++    pending->callback = move(callback);
++
++    auto entry = make<Download>();
++    entry->request = request;
++    entry->timeout = Core::Timer::create_single_shot(download_timeout, [this, download_id, pending, url] {
++        if (auto entry = m_downloads.get(download_id); entry.has_value())
++            (*entry)->request->stop();
++        Core::deferred_invoke([weak_this = make_weak_ptr(), download_id] {
++            if (weak_this)
++                weak_this->m_downloads.remove(download_id);
++        });
++        dbgln("Extensions: downloading {} timed out", url);
++        if (auto callback = move(pending->callback))
++            callback(Error::from_string_literal("The download timed out"));
++    });
++    entry->timeout->start();
++    m_downloads.set(download_id, move(entry));
++
++    request->set_buffered_request_finished_callback(
++        [this, download_id, url, redirects, pending](u64, Requests::RequestTimingInfo const&, Optional<Requests::NetworkError> const& network_error, NonnullRefPtr<HTTP::HeaderList> response_headers, Optional<u32> response_code, Optional<String>, Requests::CacheState, Core::ImmutableBytes payload) mutable {
++            auto callback = move(pending->callback);
++            if (!callback)
++                return;
++            if (auto entry = m_downloads.get(download_id); entry.has_value())
++                (*entry)->timeout->stop();
++            // The request must not be destroyed from inside its own callback.
++            Core::deferred_invoke([weak_this = make_weak_ptr(), download_id] {
++                if (weak_this)
++                    weak_this->m_downloads.remove(download_id);
++            });
++
++            if (network_error.has_value()) {
++                dbgln("Extensions: downloading {} failed: {}", url, Requests::network_error_to_string(*network_error));
++                callback(Error::from_string_literal("Network error while downloading the extension"));
++                return;
++            }
++            auto status = response_code.value_or(0);
++            if (Web::Fetch::Infrastructure::is_redirect_status(status)) {
++                auto location = response_headers->get("Location"sv);
++                auto next = location.has_value() ? URL::Parser::basic_parse(*location, url) : Optional<URL::URL> {};
++                if (!next.has_value() || redirects >= maximum_redirects) {
++                    callback(Error::from_string_literal("The store redirected the download badly"));
++                    return;
++                }
++                download(next.release_value(), move(callback), redirects + 1);
++                return;
++            }
++            if (status < 200 || status >= 300) {
++                dbgln("Extensions: downloading {} answered HTTP {}", url, status);
++                callback(Error::from_string_literal("The store did not deliver the extension"));
++                return;
++            }
++            if (payload.size() > maximum_package_size) {
++                callback(Error::from_string_literal("The extension package is too large"));
++                return;
++            }
++            auto bytes = ByteBuffer::copy(payload.bytes());
++            if (bytes.is_error()) {
++                callback(bytes.release_error());
++                return;
++            }
++            callback(bytes.release_value());
++        });
++}
++
++ErrorOr<ByteString> StoreInstaller::install_and_keep(ReadonlyBytes package, StringView store)
++{
++    auto result = TRY(m_manager.install_package(package, {}, "auto"sv));
++    if (auto const* failure = result.get_pointer<ExtensionManager::InstallFailure>()) {
++        warnln("Extensions: the store package does not install: {}", failure->message);
++        return Error::from_string_literal("The extension could not be installed");
++    }
++    auto const& installed = result.get<ExtensionManager::InstalledExtension>();
++    auto id = installed.id.to_byte_string();
++
++    auto file_name = file_name_for(id, store == "chrome"sv ? "crx"sv : "xpi"sv);
++    TRY(Core::Directory::create(packages_directory(), Core::Directory::CreateDirectories::Yes));
++    auto path = LexicalPath::join(packages_directory(), file_name).string();
++    auto temporary_path = ByteString::formatted("{}.part", path);
++    {
++        auto file = TRY(Core::File::open(temporary_path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate));
++        TRY(file->write_until_depleted(package));
++    }
++    TRY(FileSystem::move_file(path, temporary_path, FileSystem::PreserveMode::Nothing));
++
++    m_kept_packages.remove_all_matching([&](auto const& kept) { return kept.extension_id == id; });
++    m_kept_packages.append({ id, file_name, store });
++    write_index();
++
++    outln("Installed extension from {}: {} {} at {}", store_name(store), installed.display_name, installed.version, installed.base_url);
++    return id;
++}
++
++void StoreInstaller::announce_installed(ByteString const& extension_id)
++{
++    if (auto info = m_manager.management_info(extension_id); info.has_value()) {
++        auto message = ByteString::formatted("{{\"kind\":\"event\",\"name\":\"management.onInstalled\",\"args\":[{}]}}", *info);
++        deliver_event_to_extension(store_page_key("chrome"sv), message);
++    }
++    auto id = json_string(extension_id);
++    deliver_event_to_extension(store_page_key("firefox"sv), ByteString::formatted("{{\"kind\":\"event\",\"name\":\"onInstalling\",\"id\":{}}}", id));
++    deliver_event_to_extension(store_page_key("firefox"sv), ByteString::formatted("{{\"kind\":\"event\",\"name\":\"onInstalled\",\"id\":{}}}", id));
++}
++
++void StoreInstaller::announce_uninstalled(ByteString const& extension_id)
++{
++    auto id = json_string(extension_id);
++    deliver_event_to_extension(store_page_key("chrome"sv), ByteString::formatted("{{\"kind\":\"event\",\"name\":\"management.onUninstalled\",\"args\":[{}]}}", id));
++    deliver_event_to_extension(store_page_key("firefox"sv), ByteString::formatted("{{\"kind\":\"event\",\"name\":\"onUninstalling\",\"id\":{}}}", id));
++    deliver_event_to_extension(store_page_key("firefox"sv), ByteString::formatted("{{\"kind\":\"event\",\"name\":\"onUninstalled\",\"id\":{}}}", id));
++}
++
++bool StoreInstaller::uninstall(ByteString const& extension_id)
++{
++    if (!is_installed(extension_id))
++        return false;
++
++    if (on_uninstalled)
++        on_uninstalled(extension_id);
++    m_manager.uninstall(extension_id);
++
++    if (auto kept = m_kept_packages.find_if([&](auto const& kept) { return kept.extension_id == extension_id; }); !kept.is_end()) {
++        auto path = LexicalPath::join(packages_directory(), kept->file_name).string();
++        if (auto result = FileSystem::remove(path, FileSystem::RecursionMode::Disallowed); result.is_error())
++            warnln("Extensions: cannot remove {}: {}", path, result.error());
++        m_kept_packages.remove_all_matching([&](auto const& kept) { return kept.extension_id == extension_id; });
++        write_index();
++    }
++
++    outln("Removed extension {}", extension_id);
++    announce_uninstalled(extension_id);
++    return true;
++}
++
++void StoreInstaller::handle_call(Caller const& caller, String const& name, String const& args_json, Reply reply)
++{
++    auto parsed = JsonValue::from_string(args_json);
++    JsonArray args;
++    if (!parsed.is_error() && parsed.value().is_array())
++        args = parsed.value().as_array();
++
++    if (caller.store == "chrome"sv && name.starts_with_bytes("cws."sv))
++        return handle_chrome_call(caller, name, args, move(reply));
++    if (caller.store == "firefox"sv && name.starts_with_bytes("amo."sv))
++        return handle_firefox_call(caller, name, args, move(reply));
++    reply(false, "This store API is not available here."_string);
++}
++
++void StoreInstaller::handle_chrome_call(Caller const&, String const& name, JsonArray const& args, Reply reply)
++{
++    auto id = string_arg(args, 0).to_byte_string();
++
++    if (name == "cws.getAll"sv)
++        return reply(true, MUST(String::from_byte_string(m_manager.management_info().value_or("[]"sv))));
++
++    if (name == "cws.get"sv) {
++        if (auto info = is_installed(id) ? m_manager.management_info(id) : Optional<ByteString> {}; info.has_value())
++            return reply(true, MUST(String::from_byte_string(*info)));
++        return reply(false, MUST(String::formatted("Failed to find extension with id {}.", id)));
++    }
++
++    if (name == "cws.getExtensionStatus"sv) {
++        auto status = is_installed(id) ? "enabled"sv : "installable"sv;
++        return reply(true, json_string(status));
++    }
++
++    if (name == "cws.permissionWarningsByManifest"sv || name == "cws.permissionWarningsById"sv) {
++        auto preview = name == "cws.permissionWarningsById"sv ? m_manager.preview_store_manifest({}, {}, id) : m_manager.preview_store_manifest(id, {});
++        auto object = parse_object(preview);
++        if (!object.has_value() || !object->get_bool("ok"sv).value_or(false))
++            return reply(false, "Could not read the manifest."_string);
++        JsonArray warnings;
++        for (auto& warning : warnings_of(*object))
++            warnings.must_append(warning);
++        return reply(true, warnings.serialized());
++    }
++
++    if (name == "cws.beginInstall"sv)
++        return chrome_begin_install(args, move(reply));
++
++    if (name == "cws.completeInstall"sv)
++        return chrome_complete_install(id, move(reply));
++
++    if (name == "cws.setEnabled"sv) {
++        // Installed extensions are always enabled; there is nothing to switch.
++        if (!is_installed(id))
++            return reply(false, MUST(String::formatted("Failed to find extension with id {}.", id)));
++        return reply(true, String {});
++    }
++
++    if (name == "cws.uninstall"sv) {
++        auto info = is_installed(id) ? m_manager.management_info(id) : Optional<ByteString> {};
++        if (!info.has_value())
++            return reply(false, MUST(String::formatted("Failed to find extension with id {}.", id)));
++        auto confirm = args.size() > 1 && args.at(1).is_bool() && args.at(1).as_bool();
++        if (!confirm) {
++            uninstall(id);
++            return reply(true, String {});
++        }
++        auto display_name = parse_object(*info).map([](auto const& object) { return object.get_string("name"sv).value_or({}); }).value_or({});
++        Application::the().display_extension_prompt(
++            { .title = MUST(String::formatted("Remove \"{}\"?", display_name)), .message = {}, .details = {}, .accept_label = "Remove"_string },
++            [this, id, reply = move(reply)](bool accepted) {
++                if (!accepted)
++                    return reply(false, "User cancelled uninstall"_string);
++                uninstall(id);
++                reply(true, String {});
++            });
++        return;
++    }
++
++    reply(false, MUST(String::formatted("{} is not supported by this browser.", name)));
++}
++
++void StoreInstaller::chrome_begin_install(JsonArray const& args, Reply reply)
++{
++    auto result = [&](StringView code) { reply(true, json_string(code)); };
++    if (args.is_empty() || !args.at(0).is_object())
++        return result("unknown_error"sv);
++    auto const& details = args.at(0).as_object();
++    auto id = details.get_string("id"sv).value_or({}).to_byte_string();
++    auto manifest = details.get_string("manifest"sv).value_or({}).to_byte_string();
++    auto localized_name = details.get_string("localizedName"sv).value_or({});
++
++    if (!ExtensionManager::chrome_web_store_download_url(id, reported_chrome_version()).has_value())
++        return result("invalid_id"sv);
++    if (m_installs_in_progress.contains(id))
++        return result("install_in_progress"sv);
++
++    auto preview = parse_object(m_manager.preview_store_manifest(manifest, localized_name));
++    if (!preview.has_value() || !preview->get_bool("ok"sv).value_or(false))
++        return result("manifest_error"sv);
++
++    auto display_name = preview->get_string("name"sv).value_or({});
++    if (display_name.is_empty())
++        display_name = MUST(String::from_byte_string(id));
++    auto warnings = warnings_of(*preview);
++    auto is_update = is_installed(id);
++
++    m_installs_in_progress.set(id);
++    Application::the().display_extension_prompt(
++        {
++            .title = is_update ? MUST(String::formatted("Reinstall \"{}\" from the Chrome Web Store?", display_name)) : MUST(String::formatted("Add \"{}\"?", display_name)),
++            .message = warnings.is_empty() ? String {} : "It can:"_string,
++            .details = move(warnings),
++            .accept_label = "Add extension"_string,
++        },
++        [this, id, manifest = move(manifest), reply = move(reply)](bool accepted) {
++            if (!accepted) {
++                m_installs_in_progress.remove(id);
++                return reply(true, json_string("user_cancelled"sv));
++            }
++            m_approved_installs.set(id, manifest);
++            reply(true, json_string(""sv));
++        });
++}
++
++void StoreInstaller::chrome_complete_install(ByteString const& extension_id, Reply reply)
++{
++    auto approved = m_approved_installs.take(extension_id);
++    if (!approved.has_value()) {
++        m_installs_in_progress.remove(extension_id);
++        return reply(false, "No install of this item was approved."_string);
++    }
++
++    auto url_string = ExtensionManager::chrome_web_store_download_url(extension_id, reported_chrome_version());
++    auto url = url_string.has_value() ? URL::Parser::basic_parse(*url_string) : Optional<URL::URL> {};
++    if (!url.has_value()) {
++        m_installs_in_progress.remove(extension_id);
++        return reply(false, "Invalid extension id."_string);
++    }
++
++    download(url.release_value(), [this, extension_id, approved_manifest = approved.release_value(), reply = move(reply)](ErrorOr<ByteBuffer> package) {
++        ScopeGuard done = [&] { m_installs_in_progress.remove(extension_id); };
++        if (package.is_error())
++            return reply(false, MUST(String::formatted("{}", package.error())));
++
++        auto check = parse_object(ExtensionManager::check_store_package(package.value().bytes(), extension_id, {}, approved_manifest));
++        if (!check.has_value() || !check->get_bool("ok"sv).value_or(false)) {
++            auto error = check.has_value() ? check->get_string("error"sv).value_or({}) : String {};
++            warnln("Extensions: refusing the package of {} from the Chrome Web Store: {}", extension_id, error);
++            return reply(false, MUST(String::formatted("Package is invalid: {}", error)));
++        }
++
++        auto was_installed = is_installed(extension_id);
++        auto installed = install_and_keep(package.value().bytes(), "chrome"sv);
++        if (installed.is_error())
++            return reply(false, MUST(String::formatted("{}", installed.error())));
++
++        if (on_installed)
++            on_installed(installed.value(), was_installed);
++        reply(true, String {});
++        announce_installed(installed.value());
++    });
++}
++
++void StoreInstaller::handle_firefox_call(Caller const& caller, String const& name, JsonArray const& args, Reply reply)
++{
++    auto id = string_arg(args, 0).to_byte_string();
++
++    if (name == "amo.getAddonByID"sv)
++        return reply(true, MUST(String::from_byte_string(id.is_empty() ? ByteString { "null"sv } : m_manager.amo_addon(id).value_or("null"sv))));
++
++    if (name == "amo.install"sv) {
++        if (args.size() < 2 || !args.at(0).is_integer<i64>())
++            return reply(false, "Bad install request."_string);
++        return firefox_install(caller, args.at(0).as_integer<i64>(), string_arg(args, 1), string_arg(args, 2), move(reply));
++    }
++
++    if (name == "amo.cancel"sv)
++        return reply(true, String {});
++
++    if (name == "amo.uninstall"sv)
++        return reply(true, uninstall(id) ? "true"_string : "false"_string);
++
++    if (name == "amo.setEnabled"sv)
++        return reply(true, String {});
++
++    reply(false, MUST(String::formatted("{} is not supported by this browser.", name)));
++}
++
++void StoreInstaller::firefox_install(Caller const& caller, i64 install_id, String const& url_string, String const& hash, Reply reply)
++{
++    auto context_id = caller.context_id;
++    auto progress = [context_id, install_id](StringView event, StringView state, Optional<StringView> error = {}, Optional<size_t> size = {}) {
++        JsonObject message;
++        message.set("kind"sv, "install"sv);
++        message.set("installId"sv, install_id);
++        message.set("event"sv, MUST(String::from_utf8(event)));
++        message.set("state"sv, MUST(String::from_utf8(state)));
++        if (error.has_value())
++            message.set("error"sv, MUST(String::from_utf8(*error)));
++        if (size.has_value()) {
++            message.set("progress"sv, static_cast<i64>(*size));
++            message.set("maxProgress"sv, static_cast<i64>(*size));
++        }
++        auto serialized = message.serialized();
++        deliver_to_extension_context(context_id, serialized.bytes_as_string_view());
++    };
++
++    auto url = URL::Parser::basic_parse(url_string);
++    if (!url.has_value() || url->scheme() != "https"sv) {
++        progress("onDownloadFailed"sv, "STATE_DOWNLOAD_FAILED"sv, "ERROR_INVALID_DOMAIN"sv);
++        return reply(true, String {});
++    }
++    // AMO always gives a hash; without one, nothing would tie the file to the listing the user is looking at.
++    if (!hash.starts_with_bytes("sha256:"sv)) {
++        progress("onDownloadFailed"sv, "STATE_DOWNLOAD_FAILED"sv, "ERROR_INCORRECT_HASH"sv);
++        return reply(true, String {});
++    }
++
++    progress("onDownloadStarted"sv, "STATE_DOWNLOADING"sv);
++    download(url.release_value(), [this, progress, hash, reply = move(reply)](ErrorOr<ByteBuffer> package) mutable {
++        if (package.is_error()) {
++            progress("onDownloadFailed"sv, "STATE_DOWNLOAD_FAILED"sv, "ERROR_NETWORK_FAILURE"sv);
++            return reply(true, String {});
++        }
++        auto size = package.value().size();
++        progress("onDownloadProgress"sv, "STATE_DOWNLOADING"sv, {}, size);
++
++        auto check = parse_object(ExtensionManager::check_store_package(package.value().bytes(), {}, hash, {}));
++        if (!check.has_value() || !check->get_bool("ok"sv).value_or(false)) {
++            auto error = check.has_value() ? check->get_string("error"sv).value_or({}) : String {};
++            warnln("Extensions: refusing a package from addons.mozilla.org: {}", error);
++            progress("onDownloadFailed"sv, "STATE_DOWNLOAD_FAILED"sv, error.contains("hash"sv) ? "ERROR_INCORRECT_HASH"sv : "ERROR_CORRUPT_FILE"sv);
++            return reply(true, String {});
++        }
++        progress("onDownloadEnded"sv, "STATE_DOWNLOADED"sv, {}, size);
++
++        auto extension_id = check->get_string("id"sv).value_or({}).to_byte_string();
++        auto display_name = check->get_string("name"sv).value_or({});
++        auto warnings = warnings_of(*check);
++        auto is_update = is_installed(extension_id);
++        Application::the().display_extension_prompt(
++            {
++                .title = is_update ? MUST(String::formatted("Reinstall \"{}\" from addons.mozilla.org?", display_name)) : MUST(String::formatted("Add \"{}\"?", display_name)),
++                .message = warnings.is_empty() ? String {} : "It can:"_string,
++                .details = move(warnings),
++                .accept_label = "Add"_string,
++            },
++            [this, progress, package = package.release_value(), is_update, reply = move(reply)](bool accepted) {
++                if (!accepted) {
++                    progress("onInstallCancelled"sv, "STATE_CANCELLED"sv);
++                    return reply(true, String {});
++                }
++                progress("onInstallStarted"sv, "STATE_INSTALLING"sv);
++                auto installed = install_and_keep(package.bytes(), "firefox"sv);
++                if (installed.is_error()) {
++                    progress("onInstallFailed"sv, "STATE_INSTALL_FAILED"sv, "ERROR_CORRUPT_FILE"sv);
++                    return reply(true, String {});
++                }
++                if (on_installed)
++                    on_installed(installed.value(), is_update);
++                progress("onInstallEnded"sv, "STATE_INSTALLED"sv);
++                reply(true, String {});
++                announce_installed(installed.value());
++            });
++    });
++}
++
++}
++
++#endif
+diff --git a/Libraries/LibWebView/Extensions/StoreInstaller.h b/Libraries/LibWebView/Extensions/StoreInstaller.h
+new file mode 100644
+index 00000000..ca2824d1
+--- /dev/null
++++ b/Libraries/LibWebView/Extensions/StoreInstaller.h
+@@ -0,0 +1,108 @@
++/*
++ * Copyright (c) 2026, cgx-webext contributors
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++#if defined(ENABLE_WEBEXT)
++
++#    include <AK/ByteBuffer.h>
++#    include <AK/ByteString.h>
++#    include <AK/Function.h>
++#    include <AK/HashMap.h>
++#    include <AK/HashTable.h>
++#    include <AK/JsonArray.h>
++#    include <AK/RefPtr.h>
++#    include <AK/String.h>
++#    include <AK/Vector.h>
++#    include <AK/WeakPtr.h>
++#    include <AK/Weakable.h>
++#    include <LibRequests/Forward.h>
++#    include <LibURL/URL.h>
++#    include <LibWebView/Forward.h>
++
++namespace WebView {
++
++class ExtensionManager;
++
++// AD-HOC (cgx-webext): Makes the install buttons of the extension stores work. The Chrome Web Store ("Add to Chrome") and
++// addons.mozilla.org ("Add to Firefox") call private browser APIs from their pages; the store program the core injects
++// there (see webext::store in cgx-webext) forwards those calls here through the store bridge. This downloads the package
++// from the store, checks it is what the store offered, asks the user, installs it and keeps it in the profile so that it
++// is loaded again at the next start.
++//
++// Only calls from documents the browser knows to be on a store's origin reach this (see WebContentPage).
++class StoreInstaller : public Weakable<StoreInstaller> {
++    AK_ALLOC_WITH_KMALLOC;
++    AK_MAKE_NONCOPYABLE(StoreInstaller);
++    AK_MAKE_NONMOVABLE(StoreInstaller);
++
++public:
++    // Packages and their index (index.json) are kept in `data_directory`.
++    StoreInstaller(ExtensionManager&, ByteString data_directory);
++    ~StoreInstaller();
++
++    // Installs the packages kept from earlier store installs. Returns their extension ids.
++    Vector<ByteString> load_installed_packages();
++
++    struct Caller {
++        u64 context_id { 0 };
++        ByteString store; // "chrome" or "firefox"
++    };
++    using Reply = Function<void(bool ok, String json)>;
++    // A call from a store page: `name` is e.g. "cws.beginInstall", `args_json` a JSON array.
++    void handle_call(Caller const&, String const& name, String const& args_json, Reply);
++
++    // Removes an extension, whoever asked, and tells the store pages.
++    bool uninstall(ByteString const& extension_id);
++
++    // A store install finished: start the extension (its background page). `is_update` if it replaced an installed version.
++    Function<void(ByteString const& extension_id, bool is_update)> on_installed;
++    // An extension was removed: stop it.
++    Function<void(ByteString const& extension_id)> on_uninstalled;
++
++private:
++    struct Download;
++    using DownloadCallback = Function<void(ErrorOr<ByteBuffer>)>;
++    void download(URL::URL, DownloadCallback, u32 redirects = 0);
++
++    void handle_chrome_call(Caller const&, String const& name, JsonArray const& args, Reply);
++    void handle_firefox_call(Caller const&, String const& name, JsonArray const& args, Reply);
++
++    void chrome_begin_install(JsonArray const& args, Reply);
++    void chrome_complete_install(ByteString const& extension_id, Reply);
++    void firefox_install(Caller const&, i64 install_id, String const& url, String const& hash, Reply);
++
++    // Installs a checked package, keeps it, and announces it. Returns the installed id.
++    ErrorOr<ByteString> install_and_keep(ReadonlyBytes package, StringView store);
++    void announce_installed(ByteString const& extension_id);
++    void announce_uninstalled(ByteString const& extension_id);
++
++    bool is_installed(StringView extension_id) const;
++    ByteString packages_directory() const;
++    ByteString index_path() const;
++    void write_index() const;
++
++    ExtensionManager& m_manager;
++    ByteString m_data_directory;
++
++    struct KeptPackage {
++        ByteString extension_id;
++        ByteString file_name;
++        ByteString store;
++    };
++    Vector<KeptPackage> m_kept_packages;
++
++    // Chrome Web Store installs the user approved in beginInstallWithManifest3, waiting for completeInstall: id -> manifest.
++    HashMap<ByteString, ByteString> m_approved_installs;
++    HashTable<ByteString> m_installs_in_progress;
++
++    HashMap<u64, NonnullOwnPtr<Download>> m_downloads;
++    u64 m_next_download_id { 1 };
++};
++
++}
++
++#endif
+diff --git a/Libraries/LibWebView/Options.h b/Libraries/LibWebView/Options.h
+index b460461f..ae2b0cf4 100644
+--- a/Libraries/LibWebView/Options.h
++++ b/Libraries/LibWebView/Options.h
+@@ -89,6 +89,10 @@ enum class ProfileTool {
+ };
+ 
+ struct BrowserOptions {
++    // Unpacked directories or packed files (.crx/.xpi/.zip) to load as extensions at startup. Needs ENABLE_WEBEXT.
++    Vector<ByteString> extension_paths;
++    // Answer "yes" to extension install and removal prompts without asking (for automated tests). Needs ENABLE_WEBEXT.
++    bool auto_accept_extension_prompts { false };
+     Vector<String> additional_font_directories {};
+     Vector<URL::URL> urls;
+     Vector<ByteString> raw_urls;
+diff --git a/Libraries/LibWebView/WebContentClient.cpp b/Libraries/LibWebView/WebContentClient.cpp
+index f6c89740..98a4b67f 100644
+--- a/Libraries/LibWebView/WebContentClient.cpp
++++ b/Libraries/LibWebView/WebContentClient.cpp
+@@ -24,6 +24,9 @@
+ #include <LibWebCommon/WebDriver/Error.h>
+ #include <LibWebCommon/WebView/SiteIsolation.h>
+ #include <LibWebView/Application.h>
++#if defined(ENABLE_WEBEXT)
++#    include <LibWebView/Extensions/ExtensionManager.h>
++#endif
+ #include <LibWebView/AudioServerControlClient.h>
+ #include <LibWebView/BlobURLStore.h>
+ #include <LibWebView/CanonicalBrowsingContext.h>
+@@ -105,6 +108,75 @@ Messages::WebContentClient::DidRequestBlobUrlEntryResponse WebContentClient::did
+     return m_session->blob_url_store->resolve(url, token);
+ }
+ 
++Messages::WebContentClient::DidRequestExtensionResourceResponse WebContentClient::did_request_extension_resource(URL::URL url, ByteString initiator_origin)
++{
++#if defined(ENABLE_WEBEXT)
++    if (auto* manager = Application::extension_manager()) {
++        // The initiator comes from the renderer, so it is only a hint for web_accessible_resources, which the core enforces
++        // against it. A compromised renderer can claim any origin; process-level identification of the requester is a TODO.
++        auto serialized_url = url.serialize();
++        if (auto served = manager->serve(serialized_url, initiator_origin); served.has_value()) {
++            JsonObject meta;
++            meta.set("status"sv, served->status);
++            meta.set("mime"sv, MUST(String::from_byte_string(served->mime_type)));
++            if (served->content_security_policy.has_value())
++                meta.set("csp"sv, MUST(String::from_byte_string(*served->content_security_policy)));
++            auto meta_json = meta.serialized().to_byte_string();
++
++            ByteBuffer buffer;
++            u32 length = static_cast<u32>(meta_json.length());
++            if (buffer.try_append(&length, 4).is_error() || buffer.try_append(meta_json.bytes()).is_error() || buffer.try_append(served->body.bytes()).is_error())
++                return ByteBuffer {};
++            return buffer;
++        }
++    }
++#else
++    (void)url;
++    (void)initiator_origin;
++#endif
++    return ByteBuffer {};
++}
++
++Messages::WebContentClient::DidRequestExtensionContextInitResponse WebContentClient::did_request_extension_context_init(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id)
++{
++#if defined(ENABLE_WEBEXT)
++    if (auto* page = this->page(page_id))
++        return page->extension_context_init(document_id, extension_id);
++#else
++    (void)page_id;
++    (void)document_id;
++    (void)extension_id;
++#endif
++    return Optional<String> {};
++}
++
++Messages::WebContentClient::DidCallExtensionApiSyncResponse WebContentClient::did_call_extension_api_sync(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String name, String args_json)
++{
++#if defined(ENABLE_WEBEXT)
++    if (auto* page = this->page(page_id))
++        return page->call_extension_api_sync(document_id, extension_id, name, args_json);
++#else
++    (void)page_id;
++    (void)document_id;
++    (void)extension_id;
++    (void)name;
++    (void)args_json;
++#endif
++    return Optional<String> {};
++}
++
++Messages::WebContentClient::DidRequestContentScriptProgramsResponse WebContentClient::did_request_content_script_programs(Web::PageId page_id, Web::HTML::CrossProcessId document_id)
++{
++#if defined(ENABLE_WEBEXT)
++    if (auto* page = this->page(page_id))
++        return page->content_script_programs(document_id);
++#else
++    (void)page_id;
++    (void)document_id;
++#endif
++    return "[]"_string;
++}
++
+ void WebContentClient::connect_test_endpoint(NonnullOwnPtr<IPC::Transport> transport)
+ {
+     m_test_connection = make_ref_counted<WebContentTestClient>(move(transport), *this);
+diff --git a/Libraries/LibWebView/WebContentClient.h b/Libraries/LibWebView/WebContentClient.h
+index 2b8d1afa..b3924161 100644
+--- a/Libraries/LibWebView/WebContentClient.h
++++ b/Libraries/LibWebView/WebContentClient.h
+@@ -91,6 +91,10 @@ public:
+     virtual Messages::WebContentClient::DidAddBlobUrlEntryResponse did_add_blob_url_entry(Web::PageId page_id, Web::HTML::EnvironmentId environment_id, Utf16String url, Web::FileAPI::SerializedBlobURLEntry entry) override;
+     virtual void did_retain_blob_url_token(Web::HTML::CrossProcessId navigable_id, URL::BlobURLEntry::Token token) override;
+     virtual Messages::WebContentClient::DidRequestBlobUrlEntryResponse did_request_blob_url_entry(Utf16String url, Optional<URL::BlobURLEntry::Token> token) override;
++    virtual Messages::WebContentClient::DidRequestExtensionResourceResponse did_request_extension_resource(URL::URL url, ByteString initiator_origin) override;
++    virtual Messages::WebContentClient::DidRequestExtensionContextInitResponse did_request_extension_context_init(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id) override;
++    virtual Messages::WebContentClient::DidCallExtensionApiSyncResponse did_call_extension_api_sync(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String name, String args_json) override;
++    virtual Messages::WebContentClient::DidRequestContentScriptProgramsResponse did_request_content_script_programs(Web::PageId page_id, Web::HTML::CrossProcessId document_id) override;
+ 
+     WebContentClient(NonnullOwnPtr<IPC::Transport>, IsPrivate, Web::PageId initial_page_id, Web::HTML::CrossProcessId root_navigable_id);
+     ~WebContentClient();
+diff --git a/Libraries/LibWebView/WebContentPage.cpp b/Libraries/LibWebView/WebContentPage.cpp
+index 6767dfce..15adddbd 100644
+--- a/Libraries/LibWebView/WebContentPage.cpp
++++ b/Libraries/LibWebView/WebContentPage.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <AK/Debug.h>
+ #include <AK/JsonArray.h>
++#include <AK/ScopeGuard.h>
+ #include <AK/JsonObject.h>
+ #include <LibCore/ElapsedTimer.h>
+ #include <LibCore/EventLoop.h>
+@@ -17,6 +18,12 @@
+ #include <LibWebCommon/SecureContexts/AbstractOperations.h>
+ #include <LibWebCommon/WebDriver/Error.h>
+ #include <LibWebCommon/WebView/SiteIsolation.h>
++#include <AK/JsonArray.h>
++#include <AK/JsonObject.h>
++#if defined(ENABLE_WEBEXT)
++#    include <LibWebView/Extensions/ExtensionManager.h>
++#    include <LibWebView/Extensions/StoreInstaller.h>
++#endif
+ #include <LibWebView/Application.h>
+ #include <LibWebView/BlobURLStore.h>
+ #include <LibWebView/BrowsingSession.h>
+@@ -169,7 +176,15 @@ WebContentPage::WebContentPage(WebContentClient& client, Web::PageId id, Canonic
+ {
+ }
+ 
+-WebContentPage::~WebContentPage() = default;
++WebContentPage::~WebContentPage()
++{
++#if defined(ENABLE_WEBEXT)
++    // The page's documents go with it, so do the extension contexts they were.
++    auto documents = m_extension_contexts.keys();
++    for (auto document_id : documents)
++        extension_contexts_destroyed(document_id);
++#endif
++}
+ 
+ WebContentServerProxy* WebContentPage::routed_proxy() const
+ {
+@@ -2756,6 +2771,9 @@ void WebContentPage::did_forward_pinch_event_to_child_frame(Web::HTML::CrossProc
+ 
+ void WebContentPage::did_destroy_child_frame(Web::HTML::CrossProcessId frame_id)
+ {
++#if defined(ENABLE_WEBEXT)
++    ScopeGuard sweep_contexts = [this] { sweep_extension_contexts(); };
++#endif
+     auto child_frame = traversable().find(frame_id);
+     if (!child_frame.has_value() || !holds_container_of(*child_frame, "did_destroy_child_frame"sv))
+         return;
+@@ -2873,6 +2891,9 @@ void WebContentPage::did_fail_download(u64 download_id, String error)
+ 
+ void WebContentPage::did_finish_loading(Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId document_id)
+ {
++#if defined(ENABLE_WEBEXT)
++    sweep_extension_contexts();
++#endif
+     // NB: Only the page hosting the active document finishes loading it. A page standing in for a document the
+     //     navigable lost, as the page displaying the tab after its process crashed does, finishes loading the stand-in;
+     //     that must not surface in the view.
+@@ -3647,4 +3668,312 @@ Messages::WebContentClient::DidRequestCookieResponse WebContentPage::did_request
+     return cookie;
+ }
+ 
++
++#if defined(ENABLE_WEBEXT)
++static bool is_extension_scheme(Optional<String> const& scheme)
++{
++    return scheme.has_value() && scheme->is_one_of("chrome-extension"sv, "moz-extension"sv);
++}
++
++// A document this page really hosts, as the UI process knows it (never as the renderer describes it), with its navigable.
++struct HostedDocumentInfo {
++    URL::URL url;
++    URL::Origin origin;
++    bool is_top_frame { false };
++    i64 frame_id { 0 };
++};
++
++static Optional<HostedDocumentInfo> find_hosted_document(WebContentPage const& page, Web::HTML::CrossProcessId document_id)
++{
++    Optional<HostedDocumentInfo> info;
++    page.traversable().for_each_in_inclusive_subtree([&](CanonicalNavigable const& navigable) {
++        if (!page.traversable().hosts(navigable, page) || !page.hosts_active_document_of(navigable))
++            return IterationDecision::Continue;
++        auto const& document = navigable.active_document();
++        if (document.id() != document_id)
++            return IterationDecision::Continue;
++        auto top = navigable.is_top_level_traversable();
++        info = HostedDocumentInfo { .url = document.creation_url(), .origin = document.origin(), .is_top_frame = top, .frame_id = top ? 0 : static_cast<i64>(navigable.id().local_id) };
++        return IterationDecision::Break;
++    });
++    return info;
++}
++
++// The extension a hosted document is a page of, judged by its origin.
++static Optional<ByteString> extension_of_page(HostedDocumentInfo const& document, ExtensionManager& manager)
++{
++    if (document.origin.is_opaque() || !is_extension_scheme(document.origin.scheme()))
++        return {};
++    return manager.extension_for_url(ByteString::formatted("{}/", document.origin.serialize()));
++}
++
++static u64 next_extension_context_id()
++{
++    static u64 s_next_id = 1;
++    return s_next_id++;
++}
++
++// Contexts are known to the core by id; this maps them back to the page and document that host them.
++struct ExtensionContextLocation {
++    WeakPtr<WebContentClient> client;
++    Web::PageId page_id { 0 };
++    Web::HTML::CrossProcessId document_id;
++    ByteString bridge_key; // Empty for extension pages, the extension id for content scripts.
++    ByteString extension_id;
++};
++
++static HashMap<u64, ExtensionContextLocation>& extension_context_locations()
++{
++    static HashMap<u64, ExtensionContextLocation> s_locations;
++    return s_locations;
++}
++
++void deliver_to_extension_context(u64 context_id, StringView json)
++{
++    auto location = extension_context_locations().get(context_id);
++    if (!location.has_value())
++        return;
++    auto client = location->client.strong_ref();
++    if (!client)
++        return;
++    if (auto* page = client->page(location->page_id))
++        page->async_deliver_extension_message(location->document_id, MUST(String::from_byte_string(location->bridge_key)), MUST(String::from_utf8(json)));
++}
++
++void deliver_event_to_extension(StringView extension_id, StringView json)
++{
++    // Collect first: delivering may create or destroy contexts.
++    Vector<u64> targets;
++    for (auto const& [context_id, location] : extension_context_locations()) {
++        if (location.extension_id == extension_id)
++            targets.append(context_id);
++    }
++    for (auto context_id : targets)
++        deliver_to_extension_context(context_id, json);
++}
++
++Optional<WebContentPage::ExtensionContextRecord> WebContentPage::verified_extension_context(Web::HTML::CrossProcessId document_id, ByteString const& bridge_key) const
++{
++    auto documents = m_extension_contexts.get(document_id);
++    if (!documents.has_value())
++        return {};
++    auto record = documents->get(bridge_key);
++    if (!record.has_value())
++        return {};
++    // The document must still be one this page hosts.
++    if (!find_hosted_document(*this, document_id).has_value())
++        return {};
++    return *record;
++}
++
++Optional<String> WebContentPage::extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty)
++{
++    auto* manager = Application::extension_manager();
++    if (!manager)
++        return {};
++    auto document = find_hosted_document(*this, document_id);
++    if (!document.has_value())
++        return {};
++
++    auto bridge_key = extension_id_or_empty.to_byte_string();
++    if (auto existing = m_extension_contexts.get(document_id); existing.has_value()) {
++        if (auto record = existing->get(bridge_key); record.has_value())
++            return manager->init_data_for_context(record->context_id).map([](auto const& json) { return MUST(String::from_byte_string(json)); });
++    }
++
++    ByteString extension_id;
++    ExtensionManager::ContextKind kind;
++    auto serialized_url = document->url.serialize();
++
++    if (bridge_key == ExtensionManager::store_bridge_key) {
++        // The private store APIs, for a page of the Chrome Web Store or addons.mozilla.org. Both the document's URL and its
++        // origin, as this process knows them, must be the store's.
++        auto store = ExtensionManager::store_for_url(serialized_url);
++        auto origin_store = document->origin.is_opaque() ? Optional<ByteString> {} : ExtensionManager::store_for_url(ByteString::formatted("{}/", document->origin.serialize()));
++        if (!store.has_value() || store != origin_store) {
++            client().did_misbehave("did_request_extension_context_init"sv, "store APIs requested outside a store page"sv);
++            return {};
++        }
++        auto context_id = next_extension_context_id();
++        auto store_key = ByteString::formatted("{}{}", ExtensionManager::store_bridge_key, *store);
++        m_extension_contexts.ensure(document_id).set(bridge_key, { .context_id = context_id, .extension_id = store_key, .kind = ExtensionManager::ContextKind::Other });
++        extension_context_locations().set(context_id, { .client = client(), .page_id = id(), .document_id = document_id, .bridge_key = bridge_key, .extension_id = store_key });
++        JsonObject init;
++        init.set("store"sv, MUST(String::from_byte_string(*store)));
++        return init.serialized();
++    }
++
++    if (bridge_key.is_empty()) {
++        // An extension's own page.
++        auto owner = extension_of_page(*document, *manager);
++        if (!owner.has_value()) {
++            client().did_misbehave("did_request_extension_context_init"sv, "not an extension page"sv);
++            return {};
++        }
++        extension_id = owner.release_value();
++        kind = manager->is_background_url(extension_id, serialized_url) ? ExtensionManager::ContextKind::Background : ExtensionManager::ContextKind::ExtensionPage;
++    } else {
++        // Content scripts of an extension in a web page: only if that extension's content scripts match the document.
++        extension_id = bridge_key;
++        auto scripts = manager->content_scripts_for(extension_id, serialized_url, document->is_top_frame);
++        if (!scripts.has_value() || *scripts == "[]"sv || extension_of_page(*document, *manager).has_value()) {
++            client().did_misbehave("did_request_extension_context_init"sv, "no content scripts of that extension match the document"sv);
++            return {};
++        }
++        kind = ExtensionManager::ContextKind::ContentScript;
++    }
++
++    Optional<i64> tab_id;
++    if (kind != ExtensionManager::ContextKind::Background && displays_tab())
++        tab_id = static_cast<i64>(view().view_id());
++    Optional<i64> frame_id;
++    if (kind == ExtensionManager::ContextKind::ContentScript)
++        frame_id = document->frame_id;
++
++    auto context_id = next_extension_context_id();
++    auto created = manager->context_created({ .id = context_id, .extension_id = extension_id, .kind = kind, .tab_id = tab_id, .frame_id = frame_id, .url = serialized_url });
++    if (created.is_error() || !created.value())
++        return {};
++
++    m_extension_contexts.ensure(document_id).set(bridge_key, { .context_id = context_id, .extension_id = extension_id, .kind = kind });
++    extension_context_locations().set(context_id, { .client = client(), .page_id = id(), .document_id = document_id, .bridge_key = bridge_key, .extension_id = extension_id });
++
++    auto init = manager->init_data_for_context(context_id);
++    if (!init.has_value())
++        return {};
++    return MUST(String::from_byte_string(*init));
++}
++
++static StringView context_kind_name(ExtensionManager::ContextKind kind)
++{
++    switch (kind) {
++    case ExtensionManager::ContextKind::Background:
++        return "background"sv;
++    case ExtensionManager::ContextKind::ExtensionPage:
++        return "extension_page"sv;
++    case ExtensionManager::ContextKind::ContentScript:
++        return "content_script"sv;
++    case ExtensionManager::ContextKind::Other:
++        break;
++    }
++    return "other"sv;
++}
++
++static ByteString api_call_json(WebContentPage::ExtensionContextRecord const& record, String const& name, String const& args_json)
++{
++    auto args = JsonValue::from_string(args_json);
++    JsonObject caller;
++    caller.set("context"sv, context_kind_name(record.kind));
++    caller.set("contextId"sv, record.context_id);
++    JsonObject call;
++    call.set("extensionId"sv, MUST(String::from_byte_string(record.extension_id)));
++    call.set("function"sv, name);
++    call.set("args"sv, args.is_error() || !args.value().is_array() ? JsonValue { JsonArray {} } : args.release_value());
++    call.set("caller"sv, move(caller));
++    return call.serialized().to_byte_string();
++}
++
++void WebContentPage::did_call_extension_api(Web::HTML::CrossProcessId document_id, String extension_id_or_empty, u64 request_id, String name, String args_json)
++{
++    auto* manager = Application::extension_manager();
++    auto record = verified_extension_context(document_id, extension_id_or_empty.to_byte_string());
++    if (!manager || !record.has_value()) {
++        async_extension_api_reply(document_id, extension_id_or_empty, request_id, false, "Extension context invalidated."_string);
++        return;
++    }
++
++    if (record->extension_id.starts_with(ExtensionManager::store_bridge_key)) {
++        auto* installer = Application::store_installer();
++        if (!installer) {
++            async_extension_api_reply(document_id, extension_id_or_empty, request_id, false, "Extension installs are not available."_string);
++            return;
++        }
++        StoreInstaller::Caller caller { .context_id = record->context_id, .store = record->extension_id.substring(ExtensionManager::store_bridge_key.length()) };
++        installer->handle_call(caller, name, args_json, [weak_client = WeakPtr<WebContentClient> { client() }, page_id = id(), document_id, bridge_key = extension_id_or_empty, request_id](bool ok, String json) {
++            auto client = weak_client.strong_ref();
++            if (!client)
++                return;
++            if (auto* page = client->page(page_id))
++                page->async_extension_api_reply(document_id, bridge_key, request_id, ok, json);
++        });
++        return;
++    }
++
++    manager->dispatch(api_call_json(*record, name, args_json), [weak_client = WeakPtr<WebContentClient> { client() }, page_id = id(), document_id, bridge_key = extension_id_or_empty, request_id](bool ok, StringView result) {
++        auto client = weak_client.strong_ref();
++        if (!client)
++            return;
++        auto* page = client->page(page_id);
++        if (!page)
++            return;
++        // Errors arrive as {kind, message}; the page only needs the message.
++        auto text = MUST(String::from_utf8(result));
++        if (!ok) {
++            if (auto parsed = JsonValue::from_string(result); !parsed.is_error() && parsed.value().is_object())
++                text = parsed.value().as_object().get_string("message"sv).value_or(text);
++        }
++        page->async_extension_api_reply(document_id, bridge_key, request_id, ok, text);
++    });
++}
++
++Optional<String> WebContentPage::call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty, String const& name, String const& args_json)
++{
++    auto* manager = Application::extension_manager();
++    auto record = verified_extension_context(document_id, extension_id_or_empty.to_byte_string());
++    // The store APIs have no synchronous functions.
++    if (!manager || !record.has_value() || record->extension_id.starts_with(ExtensionManager::store_bridge_key))
++        return {};
++
++    Optional<String> result;
++    manager->dispatch(api_call_json(*record, name, args_json), [&](bool ok, StringView text) {
++        if (ok)
++            result = MUST(String::from_utf8(text));
++    });
++    // Synchronous APIs are answered synchronously by the core; anything else yields no value.
++    return result;
++}
++
++String WebContentPage::content_script_programs(Web::HTML::CrossProcessId document_id)
++{
++    auto* manager = Application::extension_manager();
++    if (!manager)
++        return "[]"_string;
++    auto document = find_hosted_document(*this, document_id);
++    // Extension pages do not get content scripts, and only documents this page hosts get any.
++    if (!document.has_value() || extension_of_page(*document, *manager).has_value())
++        return "[]"_string;
++    return MUST(String::from_byte_string(manager->content_script_programs(document->url.serialize(), document->is_top_frame)));
++}
++
++void WebContentPage::sweep_extension_contexts()
++{
++    if (m_extension_contexts.is_empty())
++        return;
++    Vector<Web::HTML::CrossProcessId> gone;
++    for (auto const& [document_id, records] : m_extension_contexts) {
++        if (!find_hosted_document(*this, document_id).has_value())
++            gone.append(document_id);
++    }
++    for (auto document_id : gone)
++        extension_contexts_destroyed(document_id);
++}
++
++void WebContentPage::extension_contexts_destroyed(Web::HTML::CrossProcessId document_id)
++{
++    auto records = m_extension_contexts.take(document_id);
++    if (!records.has_value())
++        return;
++    auto* manager = Application::extension_manager();
++    for (auto const& [key, record] : *records) {
++        extension_context_locations().remove(record.context_id);
++        if (manager)
++            manager->context_destroyed(record.context_id);
++    }
++}
++#else
++void WebContentPage::did_call_extension_api(Web::HTML::CrossProcessId, String, u64, String, String)
++{
++}
++#endif
++
+ }
+diff --git a/Libraries/LibWebView/WebContentPage.h b/Libraries/LibWebView/WebContentPage.h
+index 03f4e63f..58257747 100644
+--- a/Libraries/LibWebView/WebContentPage.h
++++ b/Libraries/LibWebView/WebContentPage.h
+@@ -7,6 +7,9 @@
+ #pragma once
+ 
+ #include <AK/HashTable.h>
++#if defined(ENABLE_WEBEXT)
++#    include <LibWebView/Extensions/ExtensionManager.h>
++#endif
+ #include <AK/Noncopyable.h>
+ #include <AK/Optional.h>
+ #include <AK/RefCounted.h>
+@@ -32,6 +35,13 @@
+ 
+ namespace WebView {
+ 
++#if defined(ENABLE_WEBEXT)
++// Sends a message from the extension core to the extension page (context) it is addressed to.
++void deliver_to_extension_context(u64 context_id, StringView json);
++// Sends a browser event (storage.onChanged, alarms.onAlarm, ...) to every page of an extension.
++void deliver_event_to_extension(StringView extension_id, StringView json);
++#endif
++
+ // A reply a page owes its traversable for a message the traversable sent it.
+ struct OwedReply {
+     enum class Kind : u8 {
+@@ -74,6 +84,13 @@ class WEBVIEW_API WebContentPage final
+     friend class WebContentTestClient;
+ 
+ public:
++#if defined(ENABLE_WEBEXT)
++    struct ExtensionContextRecord {
++        u64 context_id { 0 };
++        ByteString extension_id;
++        ExtensionManager::ContextKind kind { ExtensionManager::ContextKind::Other };
++    };
++#endif
+     WebContentPage(WebContentClient&, Web::PageId, CanonicalTraversable&);
+     virtual ~WebContentPage() override;
+ 
+@@ -378,6 +395,19 @@ private:
+     virtual void did_request_prompt(Utf16String message, Utf16String default_) override;
+     virtual void did_change_favicon(Gfx::ShareableBitmap favicon) override;
+     virtual void did_request_delete_all_cookies(u64 request_id, URL::URL url) override;
++    virtual void did_call_extension_api(Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, String name, String args_json) override;
++
++#if defined(ENABLE_WEBEXT)
++    // AD-HOC (cgx-webext): extension pages and content scripts in documents this page hosts. `extension_id_or_empty` is
++    // empty for an extension's own page and names the extension for content scripts.
++    Optional<String> extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty);
++    Optional<String> call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty, String const& name, String const& args_json);
++    String content_script_programs(Web::HTML::CrossProcessId document_id);
++    void extension_contexts_destroyed(Web::HTML::CrossProcessId document_id);
++    // Ends the contexts of documents this page no longer hosts (navigated away, frame removed).
++    void sweep_extension_contexts();
++
++#endif
+     Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints, Web::HTML::CrossProcessId current_navigable_id, Utf16String name, bool no_opener, Optional<URL::URL> current_document_base_url);
+     void did_close_browsing_context();
+     virtual void did_complete_close_preflight(u64 request_id, bool approved) override;
+@@ -441,6 +471,12 @@ private:
+         Web::Permissions::PermissionName name;
+     };
+     Vector<FilePermissionGrant> m_file_permission_grants;
++
++#if defined(ENABLE_WEBEXT)
++    // Extension contexts this page hosts: document -> bridge key ("" for the extension's page, extension id for content scripts).
++    HashMap<Web::HTML::CrossProcessId, HashMap<ByteString, ExtensionContextRecord>> m_extension_contexts;
++    Optional<ExtensionContextRecord> verified_extension_context(Web::HTML::CrossProcessId document_id, ByteString const& bridge_key) const;
++#endif
+ };
+ 
+ }
+diff --git a/Meta/CMake/cmake_options.cmake b/Meta/CMake/cmake_options.cmake
+index 0a974713..45d7a11c 100644
+--- a/Meta/CMake/cmake_options.cmake
++++ b/Meta/CMake/cmake_options.cmake
+@@ -31,6 +31,9 @@ else()
+ endif()
+ 
+ option(ENABLE_GUI_TARGETS "Enable building GUI targets" ON)
++
++option(ENABLE_WEBEXT "Enable WebExtensions (Chrome/Firefox extension) support using cgx-webext" OFF)
++set(WEBEXT_SOURCE_DIR "" CACHE PATH "Path to a checkout of cgx-webext. Required when ENABLE_WEBEXT is ON")
+ option(ENABLE_INSTALL_HEADERS "Enable installing headers" ON)
+ option(ENABLE_INSTALL_FREEDESKTOP_FILES "Enable installing .desktop and .service files" ${freedesktop_files_default})
+ option(LADYBIRD_ENABLE_CPPTRACE "Enable use of cpptrace as the default library for stacktraces. If not available falls back to backtrace.h" ON)
+diff --git a/Services/WebContent/ConnectionFromClient.cpp b/Services/WebContent/ConnectionFromClient.cpp
+index dc3e1b2a..f03252c9 100644
+--- a/Services/WebContent/ConnectionFromClient.cpp
++++ b/Services/WebContent/ConnectionFromClient.cpp
+@@ -3690,6 +3690,18 @@ void ConnectionFromClient::did_delete_all_cookies(Web::PageId page_id, u64 reque
+         page->did_delete_all_cookies(request_id);
+ }
+ 
++void ConnectionFromClient::extension_api_reply(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, bool ok, String json)
++{
++    if (auto page = this->page(page_id); page.has_value())
++        page->extension_api_reply(document_id, extension_id, request_id, ok, json);
++}
++
++void ConnectionFromClient::deliver_extension_message(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String json)
++{
++    if (auto page = this->page(page_id); page.has_value())
++        page->deliver_extension_message(document_id, extension_id, json);
++}
++
+ void ConnectionFromClient::toggle_media_play_state(Web::PageId page_id)
+ {
+     if (auto page = this->page(page_id); page.has_value())
+diff --git a/Services/WebContent/ConnectionFromClient.h b/Services/WebContent/ConnectionFromClient.h
+index 1db9b7e0..6d013715 100644
+--- a/Services/WebContent/ConnectionFromClient.h
++++ b/Services/WebContent/ConnectionFromClient.h
+@@ -281,6 +281,8 @@ private:
+     virtual void handle_file_return(Web::PageId page_id, i32 error, Optional<IPC::File> file, i32 request_id) override;
+     virtual void blob_url_entry_removed(Utf16String url) override;
+     virtual void did_delete_all_cookies(Web::PageId page_id, u64 request_id) override;
++    virtual void extension_api_reply(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, bool ok, String json) override;
++    virtual void deliver_extension_message(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String json) override;
+     virtual void set_system_visibility_state(Web::PageId page_id, Web::HTML::VisibilityState) override;
+     virtual void set_browsing_context_group(Web::PageId page_id, u64 browsing_context_group_id) override;
+     virtual void update_visibility_state(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::VisibilityState) override;
+diff --git a/Services/WebContent/PageClient.cpp b/Services/WebContent/PageClient.cpp
+index fb33962b..288e51fc 100644
+--- a/Services/WebContent/PageClient.cpp
++++ b/Services/WebContent/PageClient.cpp
+@@ -26,6 +26,7 @@
+ #include <LibJS/Runtime/ConsoleObject.h>
+ #include <LibMedia/Sinks/AudioOutputFactory.h>
+ #include <LibMediaClient/RemotePlaybackManager.h>
++#include <LibWeb/Internals/ExtensionBridge.h>
+ #include <LibWeb/CSS/StyleScope.h>
+ #include <LibWeb/CSS/StyleSheetIdentifier.h>
+ #include <LibWeb/CSS/StyleSheetImport.h>
+@@ -2090,6 +2091,90 @@ Optional<Web::FileAPI::SerializedBlobURLEntry> PageClient::page_did_request_blob
+     return response->take_entry();
+ }
+ 
++Optional<Web::ExtensionResource> PageClient::page_did_request_extension_resource(URL::URL const& url, ByteString const& initiator_origin)
++{
++    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidRequestExtensionResource>(url, initiator_origin);
++    if (!response) {
++        dbgln("WebContent client disconnected during DidRequestExtensionResource");
++        return {};
++    }
++
++    auto packed = response->take_packed_response();
++    if (packed.size() < 4)
++        return {};
++
++    u32 meta_length = 0;
++    __builtin_memcpy(&meta_length, packed.data(), 4);
++    if (meta_length > packed.size() - 4)
++        return {};
++
++    auto meta = JsonValue::from_string(StringView { packed.data() + 4, meta_length });
++    if (meta.is_error() || !meta.value().is_object())
++        return {};
++    auto const& object = meta.value().as_object();
++
++    Web::ExtensionResource resource;
++    resource.status = object.get_u16("status"sv).value_or(500);
++    resource.mime_type = object.get_string("mime"sv).value_or("application/octet-stream"_string);
++    if (auto csp = object.get_string("csp"sv); csp.has_value())
++        resource.content_security_policy = *csp;
++    auto body = ByteBuffer::copy(packed.bytes().slice(4 + meta_length));
++    if (body.is_error())
++        return {};
++    resource.body = body.release_value();
++    return resource;
++}
++
++Optional<String> PageClient::page_did_request_extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id)
++{
++    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidRequestExtensionContextInit>(m_id, document_id, extension_id);
++    if (!response)
++        return {};
++    return response->take_init_json();
++}
++
++void PageClient::page_did_call_extension_api(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, String const& name, String const& args_json)
++{
++    client().async_did_call_extension_api(m_id, document_id, extension_id, request_id, name, args_json);
++}
++
++Optional<String> PageClient::page_did_call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& name, String const& args_json)
++{
++    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidCallExtensionApiSync>(m_id, document_id, extension_id, name, args_json);
++    if (!response)
++        return {};
++    return response->take_result_json();
++}
++
++Optional<String> PageClient::page_did_request_content_script_programs(Web::HTML::CrossProcessId document_id)
++{
++    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidRequestContentScriptPrograms>(m_id, document_id);
++    if (!response)
++        return {};
++    return response->take_programs_json();
++}
++
++static GC::Ptr<Web::Internals::ExtensionBridge> extension_bridge_for(Web::Page& page, Web::HTML::CrossProcessId document_id, String const& extension_id)
++{
++    for (auto const& navigable : page.hosted_navigables()) {
++        if (auto document = navigable->active_document(); document && document->id() == document_id)
++            return document->extension_bridge(extension_id);
++    }
++    return {};
++}
++
++void PageClient::extension_api_reply(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, bool ok, String const& json)
++{
++    if (auto bridge = extension_bridge_for(page(), document_id, extension_id))
++        bridge->complete_call(request_id, ok, json);
++}
++
++void PageClient::deliver_extension_message(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& json)
++{
++    if (auto bridge = extension_bridge_for(page(), document_id, extension_id))
++        bridge->deliver(json);
++}
++
+ void PageClient::page_did_request_color_picker(Color current_color)
+ {
+     client().async_did_request_color_picker(m_id, current_color);
+diff --git a/Services/WebContent/PageClient.h b/Services/WebContent/PageClient.h
+index 5f91b52c..b0b01a76 100644
+--- a/Services/WebContent/PageClient.h
++++ b/Services/WebContent/PageClient.h
+@@ -47,6 +47,9 @@ class PageClient final : public Web::PageClient {
+     GC_DECLARE_ALLOCATOR(PageClient);
+ 
+ public:
++    // AD-HOC (cgx-webext): from the browser process, for the extension bridges of this page's documents.
++    void extension_api_reply(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, bool ok, String const& json);
++    void deliver_extension_message(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& json);
+     static GC::Ref<PageClient> create(PageHost& page_host, Web::PageId id, Optional<Web::HTML::CrossProcessId> pending_root_navigable_id = {});
+ 
+     virtual ~PageClient() override;
+@@ -357,6 +360,11 @@ private:
+     virtual void page_did_remove_blob_url_entries(Web::HTML::EnvironmentSettingsObject const&, Vector<Utf16String> const& urls) override;
+     virtual void page_did_retain_blob_url_token(Web::HTML::CrossProcessId navigable_id, URL::BlobURLEntry::Token) override;
+     virtual Optional<Web::FileAPI::SerializedBlobURLEntry> page_did_request_blob_url_entry(Utf16String const& url, Optional<URL::BlobURLEntry::Token> token) override;
++    virtual Optional<Web::ExtensionResource> page_did_request_extension_resource(URL::URL const& url, ByteString const& initiator_origin) override;
++    virtual Optional<String> page_did_request_extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id) override;
++    virtual void page_did_call_extension_api(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, String const& name, String const& args_json) override;
++    virtual Optional<String> page_did_call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& name, String const& args_json) override;
++    virtual Optional<String> page_did_request_content_script_programs(Web::HTML::CrossProcessId document_id) override;
+     virtual void page_did_request_color_picker(Color current_color) override;
+     virtual void page_did_request_date_picker(Utf16String input_type, Utf16String value, Utf16String minimum, Utf16String maximum) override;
+     virtual void page_did_request_file_picker(Web::HTML::FileFilter const& accepted_file_types, Web::HTML::AllowMultipleFiles) override;
+diff --git a/Services/WebContent/WebContentClient.ipc b/Services/WebContent/WebContentClient.ipc
+index 3272f8a0..c5614350 100644
+--- a/Services/WebContent/WebContentClient.ipc
++++ b/Services/WebContent/WebContentClient.ipc
+@@ -87,6 +87,16 @@ endpoint WebContentClient routed by Web::PageId page_id
+     did_request_blob_url_entry(Utf16String url, Optional<URL::BlobURLEntry::Token> token) => (Optional<Web::FileAPI::SerializedBlobURLEntry> entry)
+     did_retain_blob_url_token(Web::HTML::CrossProcessId navigable_id, URL::BlobURLEntry::Token token) =|
+ 
++    // AD-HOC (cgx-webext): Extension pages and files live in the browser process. The answer is packed as
++    // u32 LE meta_length | meta JSON {status, mime, csp} | body; empty if the URL belongs to no installed extension.
++    did_request_extension_resource(URL::URL url, ByteString initiator_origin) => (ByteBuffer packed_response)
++    // The browser process judges a document by what it knows of it (origin, URL, frame), never by what the renderer says.
++    // extension_id is empty for an extension's own page and names the extension for its content scripts in a web page.
++    [NotRouted] did_request_extension_context_init(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id) => (Optional<String> init_json)
++    did_call_extension_api(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, String name, String args_json) =|
++    [NotRouted] did_call_extension_api_sync(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String name, String args_json) => (Optional<String> result_json)
++    [NotRouted] did_request_content_script_programs(Web::PageId page_id, Web::HTML::CrossProcessId document_id) => (String programs_json)
++
+     [NotRouted] allocate_compositor_context_id(Web::PageId page_id, Web::PagePresentationRegistration page_presentation_registration) => (Web::CompositorContextId context_id)
+     did_destroy_compositor_context(Web::CompositorContextId context_id) =|
+ 
+diff --git a/Services/WebContent/WebContentServer.ipc b/Services/WebContent/WebContentServer.ipc
+index 6bc49eea..4bd6b3bd 100644
+--- a/Services/WebContent/WebContentServer.ipc
++++ b/Services/WebContent/WebContentServer.ipc
+@@ -293,6 +293,10 @@ endpoint WebContentServer routed by Web::PageId page_id
+     blob_url_entry_removed(Utf16String url) =|
+     did_delete_all_cookies(Web::PageId page_id, u64 request_id) =|
+ 
++    // AD-HOC (cgx-webext): Replies to did_call_extension_api, and messages for an extension page's chrome.*/browser.*.
++    extension_api_reply(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, bool ok, String json) =|
++    deliver_extension_message(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String json) =|
++
+     set_system_visibility_state(Web::PageId page_id, Web::HTML::VisibilityState system_visibility_state) =|
+     update_visibility_state(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::VisibilityState visibility_state) =|
+ 
+diff --git a/UI/Qt/Application.cpp b/UI/Qt/Application.cpp
+index f405d12a..ae41c2ad 100644
+--- a/UI/Qt/Application.cpp
++++ b/UI/Qt/Application.cpp
+@@ -1601,6 +1601,41 @@ void Application::display_error_dialog(StringView error_message) const
+     create_message_box(QMessageBox::Warning, error_message, active_window_if_any())->open();
+ }
+ 
++#if defined(ENABLE_WEBEXT)
++void Application::display_extension_prompt(ExtensionPrompt const& prompt, Function<void(bool)> on_answer) const
++{
++    if (browser_options().headless_mode.has_value() || browser_options().auto_accept_extension_prompts) {
++        WebView::Application::display_extension_prompt(prompt, move(on_answer));
++        return;
++    }
++
++    auto* dialog = create_message_box(QMessageBox::Question, prompt.title, active_window_if_any());
++    dialog->removeButton(dialog->button(QMessageBox::Ok));
++    if (!prompt.message.is_empty() || !prompt.details.is_empty()) {
++        StringBuilder text;
++        text.append(prompt.message);
++        for (auto const& detail : prompt.details)
++            text.appendff("\n  \u2022 {}", detail);
++        dialog->setInformativeText(qstring_from_ak_string(text.string_view().trim_whitespace()));
++    }
++    auto* accept_button = dialog->addButton(qstring_from_ak_string(prompt.accept_label), QMessageBox::AcceptRole);
++    auto* cancel_button = dialog->addButton(QMessageBox::Cancel);
++    dialog->setDefaultButton(cancel_button);
++
++    struct Answer : RefCounted<Answer> {
++        Function<void(bool)> callback;
++    };
++    auto answer = adopt_ref(*new Answer);
++    answer->callback = move(on_answer);
++    // Qt wants copyable slots; the callback is answered once, however the dialog closes.
++    QObject::connect(dialog, &QMessageBox::finished, [dialog, accept_button, answer](int) {
++        if (auto callback = move(answer->callback))
++            callback(dialog->clickedButton() == accept_button);
++    });
++    dialog->open();
++}
++#endif
++
+ void Application::open_download(WebView::FileDownloader::Download const& download) const
+ {
+     auto path = download_file_path_for_frontend_action(download);
+diff --git a/UI/Qt/Application.h b/UI/Qt/Application.h
+index 2529f66e..0aa8bca5 100644
+--- a/UI/Qt/Application.h
++++ b/UI/Qt/Application.h
+@@ -169,6 +169,9 @@ private:
+     virtual NonnullRefPtr<Core::Promise<ByteString>> ask_user_for_download_path(ByteString const& file) const override;
+     virtual void display_download_confirmation_dialog(StringView download_name, LexicalPath const& path) const override;
+     virtual void display_error_dialog(StringView error_message) const override;
++#if defined(ENABLE_WEBEXT)
++    virtual void display_extension_prompt(ExtensionPrompt const&, Function<void(bool)> on_answer) const override;
++#endif
+     virtual void open_download(WebView::FileDownloader::Download const&) const override;
+     virtual void show_download_in_folder(WebView::FileDownloader::Download const&) const override;
+ 
+diff --git a/UI/cmake/ResourceFiles.cmake b/UI/cmake/ResourceFiles.cmake
+index 46ecf223..7e3d0adb 100644
+--- a/UI/cmake/ResourceFiles.cmake
++++ b/UI/cmake/ResourceFiles.cmake
+@@ -28,6 +28,10 @@ set(SITE_COMPATIBILITY_RESOURCES
+     cnn.com.json
+     nytimes.com.json
+ )
++if (ENABLE_WEBEXT)
++    # AD-HOC (cgx-webext): addons.mozilla.org only offers "Add to Firefox" to Firefox.
++    list(APPEND SITE_COMPATIBILITY_RESOURCES addons.mozilla.org.json)
++endif()
+ list(TRANSFORM SITE_COMPATIBILITY_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/WebCompat/")
+ 
+ set(ABOUT_PAGES
+diff --git a/WebCompat/addons.mozilla.org.json b/WebCompat/addons.mozilla.org.json
+new file mode 100644
+index 00000000..f38b32e5
+--- /dev/null
++++ b/WebCompat/addons.mozilla.org.json
+@@ -0,0 +1,8 @@
++{
++    "matches": [
++        "https://addons.mozilla.org/*"
++    ],
++    "user_agent": [
++        "as_Firefox"
++    ]
++}

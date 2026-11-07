@@ -1,0 +1,27 @@
+name: Upstream drift
+
+# Ladybird and the browsers' extension APIs both move. This job finds out early when either breaks us.
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+jobs:
+  ladybird:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Clone Ladybird master
+        run: git clone --depth 1 https://github.com/LadybirdBrowser/ladybird.git ../ladybird
+      - name: Patch still applies
+        run: Integration/ladybird/apply.sh ../ladybird --check
+      - name: Adapter still type-checks against Ladybird's headers
+        run: Integration/ladybird/check-adapter.sh ../ladybird
+
+  registry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: API registry still agrees with MDN browser-compat-data
+        run: python3 Tools/verify_registry.py --refresh

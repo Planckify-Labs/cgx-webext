@@ -1,0 +1,118 @@
+# Integration guide: what a browser must build
+
+This is the contract between the core and an embedding browser, and an honest list of the engine work that remains. File
+references are to Ladybird at the commit in `Integration/ladybird/SUPPORTED_COMMIT`; they show where each piece would
+attach, not that anything there has been changed.
+
+## What the core already does for you
+
+Call these; do not reimplement them.
+
+| You need to... | Call | When |
+|---|---|---|
+| Install a package | `webext_install_package` | User installs a `.crx`/`.xpi`/`.zip` |
+| Know how to host it | `webext_extension_info` | After install and at startup |
+| Run its background code | (info → `background`) | See item 2 |
+| Pick content scripts for a page | `webext_content_scripts` | On every navigation / frame creation |
+| Serve its files | `webext_read_file` | A request for `<scheme>://<id>/path` |
+| Gate web-page access to those files | `webext_is_web_accessible` | When the requester is not the extension |
+| Build `chrome.*`/`browser.*` | `webext_init_data` + `Shim/webext-shim.js` | When creating a context |
+| Run an API call | `webext_dispatch` | Each call from a context |
+| Fire alarms | `webext_tick` | When the timer from `schedule_alarm_check` elapses |
+| Tell it about lifecycle | `webext_notify_installed`, `webext_notify_startup` | Install/update, browser start |
+
+And you provide the callbacks in `WebExtHostCallbacks`: persistence (`read_storage`/`write_storage`), time, locale, event
+delivery (`dispatch_event`), the delegated browser calls (`call_browser` → later `webext_complete`), permission prompts
+(`request_permissions` → later `webext_complete_permission`), and a timer hint (`schedule_alarm_check`).
+
+## What the browser has to build
+
+Ordered roughly by when you need it. "Core support" says what already exists for it.
+
+### 1. Extension origin and resource serving
+Register a scheme (`chrome-extension://<id>/`, or `moz-extension://<random-uuid>/` as Firefox does so that pages cannot
+probe for installed extensions by ID). Serve files with `webext_read_file`; for requests whose initiator is a web page, require
+`webext_is_web_accessible`. Apply `csp.extensionPages` from `webext_extension_info` as the Content-Security-Policy of every
+extension page. Treat each extension origin as a separate origin and site for process isolation.
+*Ladybird:* the loading path is `LibWebView/NavigationLoader` and the `RequestServer` process (`Documentation/ProcessArchitecture.md`).
+
+### 2. Background context
+`info.background.kind` is `page`, `scripts`, `service_worker` or `none`. For `scripts`, generate a page that loads the scripts
+in order; for `page`, load it. For `service_worker`, run the script as an event page: a hidden page at the extension origin that
+loads the script (as a module if `module` is true). Genuine service-worker lifetimes (idle shutdown, wake on event) are *not*
+modelled; the simple approach is to keep the context alive. Chrome's `importScripts` needs a shim in that context.
+Firefox allows `scripts` and `service_worker` together; prefer `scripts`.
+*Ladybird:* `HeadlessWebView` (`LibWebView/HeadlessWebView.h`) is the likely hidden-page host.
+
+### 3. Building `chrome.*` / `browser.*` in each context
+Load `Shim/webext-shim.js`, then call `createApi(init, bridge)` with the JSON from `webext_init_data` and a bridge whose
+`call(name, args)` returns a Promise carrying the result of `webext_dispatch` and whose `callSync` is a synchronous call for the
+functions in `init.syncFunctions` (`i18n.getMessage`, ...). Expose `api.chrome` / `api.browser` as globals of that context.
+*Needs from the engine:* a way to inject the objects before the extension's own scripts run, and a synchronous renderer→Browser
+IPC (`Services/WebContent/WebContentServer.ipc` has the style; this would be a new message).
+
+### 4. Content scripts and isolated worlds  (largest engine task)
+On document creation call `webext_content_scripts(id, url, is_top_frame, fallback_url)` and run the returned scripts at their
+`runAt` stage. Content scripts must run in an **isolated world**: same DOM, but their own JavaScript globals, so the page cannot
+see or tamper with them and they cannot clash with page variables. `world: "MAIN"` scripts run in the page's own world.
+*Ladybird today:* `PageClient::run_javascript` (`Services/WebContent/PageClient.cpp`) evaluates a classic script against the
+document's relevant settings object, i.e. only the page's own world. A second realm per window that shares DOM wrappers is
+new engine work in `LibWeb/Bindings` and `LibWeb/HTML/Scripting` (`WindowRealm`); read `Documentation/WrapperArchitecture.md`
+first. Do **not** ship extensions by running content scripts in the main world: that is neither secure nor compatible.
+
+### 5. Messaging
+`runtime.sendMessage`, `tabs.sendMessage` and `runtime.onMessage` are `delegated`: you receive an `ApiCall`, route it to the
+right context(s), call that context's `api.deliverMessage(message, sender)` (resolves `{handled, response}`), and complete the
+call with the response. Implement `sender` (`id`, `tab`, `frameId`, `url`, `origin`). **Ports** (`runtime.connect`,
+`onConnect`, `tabs.connect`) are *planned* in the core and are the most common blocker among real extensions
+([COMPATIBILITY.md](COMPATIBILITY.md)).
+
+### 6. Browser-UI APIs (`delegated`)
+`tabs`, `windows`, `action`, `contextMenus`, `cookies`, `scripting`: you receive validated calls (permission and manifest
+version already checked, aliases such as `browserAction` → `action` already resolved) and implement them against your
+tab and window model. The authoritative list is `webext-coverage registry` / `docs/COVERAGE.md`, filtered to `delegated`.
+`activeTab` grants are tracked by `PermissionState::grant_active_tab` (not yet exposed through the C ABI; add it when you
+implement the toolbar action).
+*Ladybird:* tabs/views are `LibWebView/ViewImplementation`, `Application`; cookies `LibWebView/CookieJar`.
+
+### 7. Network APIs (`planned`)
+`declarativeNetRequest` (what MV3 content blockers use) and `webRequest`, including blocking handlers (what uBlock Origin
+MV2 uses). Both need hooks in the network stack (`Services/RequestServer`). Ladybird's content blocker
+(`LibWeb/ContentBlocker`, built on the `adblock` crate) is a natural engine for translating DNR rules. Not started here.
+
+### 8. User interface
+An extensions manager (install from file, enable/disable, remove, show permissions), toolbar buttons (from `info.action`),
+popup hosting (`info.action.popup` in a small window at the extension origin), options pages, permission prompts for
+`request_permissions`, and an install prompt listing `info.permissions`/`hostPermissions`. Ladybird has Qt and Android frontends
+(`UI/Qt`, `UI/Android`); each needs its own.
+
+### 9. Signatures and policy
+`Package::verify_crx3` builds the exact signed bytes and checks that a signing key hashes to the declared ID; you supply the
+RSA/ECDSA verification (`LibCrypto`). Mozilla `.xpi` signatures (`Package::has_mozilla_signature`) are PKCS#7 and are not
+verified by the core. Decide the policy for unsigned/developer installs, and whether to fetch from the Chrome Web Store or
+addons.mozilla.org (check their terms before pointing a third-party browser at them).
+
+### 10. Persistence
+Store the blobs from `write_storage` under the profile directory, one per `(extension, key)`; keep the package files for
+`webext_read_file` (re-run `webext_install_package` from the stored package at startup, which also restores permissions
+and storage).
+
+## Suggested milestones
+
+1. **Serve and install**: items 1 and 10 (+ install UI minimum). *Done when* `webext_extension_info` works for a dropped-in
+   package and its popup HTML loads from the extension origin.
+2. **Background + storage**: items 2, 3 and the persistence callbacks. *Done when* `Tests/Fixtures/storage-popup` counts
+   alarm ticks and survives a restart.
+3. **Content scripts (interim)**: item 4 with main-world only for `hello-content-script`, clearly marked insecure and off by
+   default, while the isolated-world design lands upstream.
+4. **Messaging and UI APIs**: items 5, 6, 8. Target: Vimium-class extensions (content scripts + messaging + tabs).
+5. **Ports, commands, webNavigation** in the core, then **network APIs** (item 7).
+
+Check progress at any time with `webext-coverage inspect` on the real extension you are targeting.
+
+## Not verified yet
+
+Honest limits of what has been tested so far: the C++ adapter (`Integration/ladybird/files/`) has been type-checked against
+Ladybird's headers but not linked or executed; no extension has been run in a browser; the Chrome-side API availability for
+APIs absent from MDN's data is hand-maintained; behaviour that differs between Chrome and Firefox in corner cases (port
+handling in match patterns, glob case sensitivity) is noted in the README as assumptions.

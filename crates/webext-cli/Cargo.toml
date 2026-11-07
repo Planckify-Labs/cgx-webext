@@ -1,0 +1,18 @@
+[package]
+name = "webext-cli"
+description = "Inspect extension packages and report how much of their API surface is supported"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "webext-coverage"
+path = "src/main.rs"
+
+[dependencies]
+webext = { path = "../webext" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

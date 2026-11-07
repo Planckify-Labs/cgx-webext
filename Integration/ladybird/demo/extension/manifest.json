@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "cgx-webext demo",
+  "version": "1.0",
+  "description": "Shows a content script, a background page, storage and messaging working in Ladybird.",
+  "permissions": ["storage"],
+  "background": { "scripts": ["background.js"], "service_worker": "background.js" },
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["early.js"], "run_at": "document_start" },
+    { "matches": ["<all_urls>"], "js": ["banner.js"], "run_at": "document_idle" }
+  ]
+}

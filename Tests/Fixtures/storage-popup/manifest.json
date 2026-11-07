@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "__MSG_extName__",
+  "version": "2.1",
+  "default_locale": "en",
+  "description": "__MSG_extDescription__",
+  "permissions": ["storage", "alarms"],
+  "optional_permissions": ["history"],
+  "background": { "service_worker": "background.js", "scripts": ["background.js"] },
+  "action": { "default_popup": "popup.html", "default_title": "__MSG_extName__" },
+  "browser_specific_settings": { "gecko": { "id": "storage-popup@example.org" } }
+}

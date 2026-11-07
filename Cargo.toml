@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/webext", "crates/webext-cli", "crates/webext-ffi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "BSD-2-Clause"
+repository = "https://github.com/OWNER/cgx-webext"
+
+[workspace.dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+base64 = "0.22"
+miniz_oxide = "0.8"
+crc32fast = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

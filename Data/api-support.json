@@ -1,0 +1,708 @@
+{
+  "_comment": "Curated extension API surface. 'status' is OUR implementation status and is maintained by hand: implemented (core handles it, tested), partial (works with documented limits), delegated (core validates and routes to the host browser, which must implement it), planned (not yet), unsupported (will not be supported). A test enforces that implemented/partial entries have a real handler and that delegated entries reach the host. Chrome/Firefox AVAILABILITY (engines, only) is synced from MDN browser-compat-data by Tools/sync_registry.py and checked by Tools/verify_registry.py; Chrome-only APIs that BCD omits (sidePanel, offscreen, ...) are maintained by hand. 'storage' is modelled by hand with nested areas.",
+  "version": 1,
+  "sync_functions": ["runtime.getManifest", "runtime.getURL", "extension.getURL", "i18n.getMessage", "i18n.getUILanguage"],
+  "aliases": {
+    "browserAction": "action",
+    "menus": "contextMenus"
+  },
+  "namespaces": {
+    "runtime": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "implemented": ["getManifest", "getURL", "connect", "sendMessage"],
+        "delegated": ["openOptionsPage", "reload", "getPlatformInfo", "setUninstallURL"],
+        "planned": ["connectNative", "sendNativeMessage", "getBackgroundPage", "requestUpdateCheck", "restart", "getContexts", "getPackageDirectoryEntry", "getBrowserInfo", "getDocumentId", "getFrameId", "getVersion"]
+      },
+      "events": {
+        "implemented": ["onInstalled", "onStartup", "onMessage", "onConnect"],
+        "delegated": ["onMessageExternal"],
+        "planned": ["onConnectExternal", "onSuspend", "onSuspendCanceled", "onUpdateAvailable", "onUserScriptMessage", "onBrowserUpdateAvailable", "onPerformanceWarning", "onRestartRequired", "onUserScriptConnect"]
+      },
+      "properties": {
+        "implemented": ["id", "lastError"]
+      },
+      "only": {
+        "getBrowserInfo": "firefox",
+        "getDocumentId": "firefox",
+        "getFrameId": "firefox",
+        "getPackageDirectoryEntry": "chrome",
+        "onBrowserUpdateAvailable": "chrome",
+        "onPerformanceWarning": "firefox",
+        "onRestartRequired": "chrome",
+        "requestUpdateCheck": "chrome",
+        "restart": "firefox"
+      }
+    },
+    "extension": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "implemented": ["getURL"],
+        "planned": ["getBackgroundPage", "getViews", "isAllowedIncognitoAccess", "isAllowedFileSchemeAccess", "setUpdateUrlData"]
+      },
+      "properties": {
+        "planned": ["inIncognitoContext", "lastError"]
+      },
+      "mv": {
+        "getBackgroundPage": [2],
+        "getViews": [2],
+        "getURL": [2]
+      },
+      "only": {
+        "setUpdateUrlData": "chrome"
+      }
+    },
+    "storage": {
+      "permission": "storage",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "implemented": ["local.get", "local.set", "local.remove", "local.clear", "local.getBytesInUse", "local.getKeys", "session.get", "session.set", "session.remove", "session.clear", "session.getBytesInUse", "session.getKeys"],
+        "partial": ["sync.get", "sync.set", "sync.remove", "sync.clear", "sync.getBytesInUse", "sync.getKeys", "managed.get"],
+        "planned": ["local.setAccessLevel", "session.setAccessLevel", "sync.setAccessLevel", "managed.getBytesInUse"]
+      },
+      "events": {
+        "implemented": ["onChanged"],
+        "planned": ["local.onChanged", "sync.onChanged", "session.onChanged", "managed.onChanged"]
+      },
+      "properties": {
+        "implemented": ["sync.QUOTA_BYTES", "sync.QUOTA_BYTES_PER_ITEM", "sync.MAX_ITEMS", "sync.MAX_WRITE_OPERATIONS_PER_HOUR", "sync.MAX_WRITE_OPERATIONS_PER_MINUTE", "local.QUOTA_BYTES", "session.QUOTA_BYTES"]
+      },
+      "only": {
+        "session.setAccessLevel": "chrome",
+        "session.getKeys": "chrome",
+        "local.getKeys": "chrome",
+        "sync.getKeys": "chrome",
+        "managed.getBytesInUse": "chrome"
+      },
+      "notes": {
+        "sync.*": "Backed by local storage with sync quotas; there is no cross-device sync.",
+        "managed.get": "Always returns an empty object until enterprise policy is supported."
+      }
+    },
+    "i18n": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "implemented": ["getMessage", "getUILanguage"],
+        "delegated": ["getAcceptLanguages"],
+        "planned": ["detectLanguage", "getPreferredSystemLanguages"]
+      },
+      "only": {
+        "getPreferredSystemLanguages": "firefox"
+      }
+    },
+    "alarms": {
+      "permission": "alarms",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "implemented": ["create", "get", "getAll", "clear", "clearAll"]
+      },
+      "events": {
+        "implemented": ["onAlarm"]
+      }
+    },
+    "permissions": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "implemented": ["contains", "getAll", "request", "remove"],
+        "planned": ["addHostAccessRequest", "removeHostAccessRequest"]
+      },
+      "events": {
+        "implemented": ["onAdded", "onRemoved"]
+      },
+      "only": {
+        "addHostAccessRequest": "chrome",
+        "removeHostAccessRequest": "chrome"
+      }
+    },
+    "tabs": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "delegated": ["query", "get", "getCurrent", "create", "update", "remove", "reload", "duplicate", "goBack", "goForward", "move", "highlight", "captureVisibleTab", "detectLanguage", "discard", "getZoom", "setZoom", "executeScript", "insertCSS", "removeCSS"],
+        "planned": ["group", "ungroup", "toggleReaderMode", "saveAsPDF", "print", "printPreview", "getZoomSettings", "setZoomSettings", "warmup", "hide", "show", "captureTab", "moveInSuccession"],
+        "implemented": ["connect", "sendMessage"]
+      },
+      "events": {
+        "delegated": ["onCreated", "onUpdated", "onRemoved", "onActivated", "onMoved", "onAttached", "onDetached", "onReplaced", "onHighlighted", "onZoomChange"],
+        "planned": []
+      },
+      "properties": {
+        "implemented": ["TAB_ID_NONE"]
+      },
+      "only": {
+        "captureTab": "firefox",
+        "hide": "firefox",
+        "moveInSuccession": "firefox",
+        "onReplaced": "chrome",
+        "print": "firefox",
+        "printPreview": "firefox",
+        "saveAsPDF": "firefox",
+        "setZoomSettings": "chrome",
+        "show": "firefox",
+        "toggleReaderMode": "firefox",
+        "warmup": "firefox"
+      },
+      "mv": {
+        "executeScript": [2],
+        "insertCSS": [2],
+        "removeCSS": [2]
+      },
+      "perm_overrides": {
+        "executeScript": "tabs",
+        "insertCSS": "tabs",
+        "removeCSS": "tabs"
+      }
+    },
+    "windows": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "delegated": ["get", "getCurrent", "getLastFocused", "getAll", "create", "update", "remove"]
+      },
+      "events": {
+        "delegated": ["onCreated", "onRemoved", "onFocusChanged"],
+        "planned": ["onBoundsChanged"]
+      },
+      "properties": {
+        "implemented": ["WINDOW_ID_NONE", "WINDOW_ID_CURRENT"]
+      },
+      "only": {
+        "onBoundsChanged": "chrome"
+      }
+    },
+    "scripting": {
+      "permission": "scripting",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "delegated": ["executeScript", "insertCSS", "removeCSS", "registerContentScripts", "unregisterContentScripts", "getRegisteredContentScripts", "updateContentScripts"]
+      }
+    },
+    "action": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "delegated": ["setTitle", "getTitle", "setIcon", "setPopup", "getPopup", "setBadgeText", "getBadgeText", "setBadgeBackgroundColor", "getBadgeBackgroundColor", "setBadgeTextColor", "getBadgeTextColor", "enable", "disable", "isEnabled", "openPopup"],
+        "planned": ["getUserSettings"]
+      },
+      "events": {
+        "delegated": ["onClicked"],
+        "planned": ["onUserSettingsChanged"]
+      }
+    },
+    "pageAction": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["show", "hide", "isShown", "setTitle", "getTitle", "setIcon", "setPopup", "getPopup", "openPopup"]
+      },
+      "events": {
+        "planned": ["onClicked"]
+      },
+      "mv": {
+        "show": [2],
+        "hide": [2]
+      },
+      "notes": {
+        "*": "Chrome only has pageAction in MV2."
+      },
+      "only": {
+        "isShown": "firefox",
+        "openPopup": "firefox"
+      }
+    },
+    "contextMenus": {
+      "permission": "contextMenus",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "delegated": ["create", "update", "remove", "removeAll"],
+        "planned": ["refresh", "overrideContext", "getTargetElement"]
+      },
+      "events": {
+        "delegated": ["onClicked"],
+        "planned": ["onShown", "onHidden"]
+      },
+      "only": {
+        "getTargetElement": "firefox",
+        "onHidden": "firefox",
+        "onShown": "firefox",
+        "overrideContext": "firefox",
+        "refresh": "firefox"
+      },
+      "notes": {
+        "*": "Firefox exposes this as 'menus' (permission 'menus') and also as 'contextMenus'."
+      }
+    },
+    "commands": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["getAll", "update", "reset", "openShortcutSettings"]
+      },
+      "events": {
+        "planned": ["onCommand", "onChanged"]
+      },
+      "only": {
+        "onChanged": "firefox",
+        "openShortcutSettings": "firefox",
+        "reset": "firefox",
+        "update": "firefox"
+      }
+    },
+    "cookies": {
+      "permission": "cookies",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "delegated": ["get", "getAll", "set", "remove", "getAllCookieStores"],
+        "planned": ["sameSiteStatus"]
+      },
+      "events": {
+        "delegated": ["onChanged"]
+      }
+    },
+    "webNavigation": {
+      "permission": "webNavigation",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["getFrame", "getAllFrames"]
+      },
+      "events": {
+        "planned": ["onBeforeNavigate", "onCommitted", "onDOMContentLoaded", "onCompleted", "onErrorOccurred", "onHistoryStateUpdated", "onCreatedNavigationTarget", "onReferenceFragmentUpdated", "onTabReplaced"]
+      }
+    },
+    "webRequest": {
+      "permission": "webRequest",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["handlerBehaviorChanged", "filterResponseData", "getSecurityInfo"]
+      },
+      "events": {
+        "planned": ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onAuthRequired", "onBeforeRedirect", "onResponseStarted", "onCompleted", "onErrorOccurred"]
+      },
+      "only": {
+        "filterResponseData": "firefox",
+        "getSecurityInfo": "firefox"
+      },
+      "notes": {
+        "*": "Blocking handlers need 'webRequestBlocking'; Chrome allows them only for force-installed MV2 extensions."
+      }
+    },
+    "declarativeNetRequest": {
+      "permission": "declarativeNetRequest",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["updateDynamicRules", "getDynamicRules", "updateSessionRules", "getSessionRules", "updateEnabledRulesets", "getEnabledRulesets", "getAvailableStaticRuleCount", "getDisabledRuleIds", "updateStaticRules", "isRegexSupported", "testMatchOutcome", "setExtensionActionOptions", "getMatchedRules"]
+      },
+      "events": {
+        "planned": ["onRuleMatchedDebug"]
+      },
+      "only": {
+        "getMatchedRules": "chrome",
+        "onRuleMatchedDebug": "chrome",
+        "setExtensionActionOptions": "chrome"
+      }
+    },
+    "downloads": {
+      "permission": "downloads",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["download", "search", "pause", "resume", "cancel", "open", "show", "showDefaultFolder", "erase", "removeFile", "acceptDanger", "drag", "setShelfEnabled", "setUiOptions", "getFileIcon"]
+      },
+      "events": {
+        "planned": ["onCreated", "onErased", "onChanged", "onDeterminingFilename"]
+      },
+      "only": {
+        "acceptDanger": "chrome",
+        "drag": "chrome",
+        "onDeterminingFilename": "chrome",
+        "setShelfEnabled": "chrome",
+        "setUiOptions": "chrome"
+      }
+    },
+    "notifications": {
+      "permission": "notifications",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["create", "update", "clear", "getAll", "getPermissionLevel"]
+      },
+      "events": {
+        "planned": ["onClicked", "onClosed", "onButtonClicked", "onShown", "onPermissionLevelChanged"]
+      },
+      "only": {
+        "getPermissionLevel": "chrome",
+        "onButtonClicked": "chrome",
+        "onPermissionLevelChanged": "chrome",
+        "onShown": "firefox",
+        "update": "chrome"
+      }
+    },
+    "bookmarks": {
+      "permission": "bookmarks",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["get", "getChildren", "getRecent", "getTree", "getSubTree", "search", "create", "move", "update", "remove", "removeTree"]
+      },
+      "events": {
+        "planned": ["onCreated", "onRemoved", "onChanged", "onMoved", "onChildrenReordered", "onImportBegan", "onImportEnded"]
+      },
+      "only": {
+        "onChildrenReordered": "chrome",
+        "onImportBegan": "chrome",
+        "onImportEnded": "chrome"
+      }
+    },
+    "history": {
+      "permission": "history",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["search", "getVisits", "addUrl", "deleteUrl", "deleteRange", "deleteAll"]
+      },
+      "events": {
+        "planned": ["onVisited", "onVisitRemoved", "onTitleChanged"]
+      },
+      "only": {
+        "onTitleChanged": "firefox"
+      }
+    },
+    "sessions": {
+      "permission": "sessions",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["getRecentlyClosed", "restore", "getDevices", "forgetClosedTab", "forgetClosedWindow", "getTabValue", "getWindowValue", "removeTabValue", "removeWindowValue", "setTabValue", "setWindowValue"]
+      },
+      "events": {
+        "planned": ["onChanged"]
+      },
+      "only": {
+        "forgetClosedTab": "firefox",
+        "forgetClosedWindow": "firefox",
+        "getTabValue": "firefox",
+        "getWindowValue": "firefox",
+        "removeTabValue": "firefox",
+        "removeWindowValue": "firefox",
+        "setTabValue": "firefox",
+        "setWindowValue": "firefox"
+      }
+    },
+    "topSites": {
+      "permission": "topSites",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["get"]
+      }
+    },
+    "browsingData": {
+      "permission": "browsingData",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["remove", "removeCache", "removeCookies", "removeDownloads", "removeFormData", "removeHistory", "removeLocalStorage", "removePasswords", "removeIndexedDB", "settings", "removePluginData"]
+      }
+    },
+    "idle": {
+      "permission": "idle",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["queryState", "setDetectionInterval"]
+      },
+      "events": {
+        "planned": ["onStateChanged"]
+      }
+    },
+    "management": {
+      "permission": "management",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["getAll", "get", "getSelf", "setEnabled", "uninstall", "uninstallSelf", "getPermissionWarningsById", "getPermissionWarningsByManifest", "install"]
+      },
+      "events": {
+        "planned": ["onInstalled", "onUninstalled", "onEnabled", "onDisabled"]
+      },
+      "only": {
+        "getPermissionWarningsById": "chrome",
+        "getPermissionWarningsByManifest": "chrome",
+        "install": "firefox",
+        "uninstall": "chrome"
+      }
+    },
+    "search": {
+      "permission": "search",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["query", "search", "get"]
+      },
+      "only": {
+        "get": "firefox",
+        "search": "firefox"
+      }
+    },
+    "identity": {
+      "permission": "identity",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["launchWebAuthFlow", "getRedirectURL", "getAuthToken", "getProfileUserInfo", "removeCachedAuthToken", "clearAllCachedAuthTokens"]
+      },
+      "only": {
+        "clearAllCachedAuthTokens": "chrome",
+        "getAuthToken": "chrome",
+        "getProfileUserInfo": "chrome",
+        "removeCachedAuthToken": "chrome"
+      }
+    },
+    "offscreen": {
+      "permission": "offscreen",
+      "engines": ["chrome"],
+      "functions": {
+        "planned": ["createDocument", "closeDocument", "hasDocument"]
+      }
+    },
+    "sidePanel": {
+      "permission": "sidePanel",
+      "engines": ["chrome"],
+      "functions": {
+        "planned": ["setOptions", "getOptions", "setPanelBehavior", "getPanelBehavior", "open", "getLayout"]
+      },
+      "events": {
+        "planned": ["onOpened"]
+      }
+    },
+    "sidebarAction": {
+      "permission": null,
+      "engines": ["firefox"],
+      "functions": {
+        "planned": ["setTitle", "getTitle", "setIcon", "setPanel", "getPanel", "open", "close", "toggle", "isOpen"]
+      }
+    },
+    "theme": {
+      "permission": "theme",
+      "engines": ["firefox"],
+      "functions": {
+        "planned": ["getCurrent", "update", "reset"]
+      },
+      "events": {
+        "planned": ["onUpdated"]
+      }
+    },
+    "userScripts": {
+      "permission": "userScripts",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["register", "unregister", "getScripts", "update", "configureWorld", "getWorldConfigurations", "resetWorldConfiguration", "execute"]
+      }
+    },
+    "proxy": {
+      "permission": "proxy",
+      "engines": ["firefox"],
+      "functions": {
+        "planned": []
+      },
+      "events": {
+        "planned": ["onError", "onRequest"]
+      },
+      "properties": {
+        "planned": ["settings"]
+      }
+    },
+    "privacy": {
+      "permission": "privacy",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": []
+      },
+      "properties": {
+        "planned": ["network", "services", "websites"]
+      }
+    },
+    "contentSettings": {
+      "permission": "contentSettings",
+      "engines": ["chrome"],
+      "functions": {
+        "planned": []
+      }
+    },
+    "tts": {
+      "permission": "tts",
+      "engines": ["chrome"],
+      "functions": {
+        "planned": ["speak", "stop", "pause", "resume", "isSpeaking", "getVoices"]
+      }
+    },
+    "tabGroups": {
+      "permission": "tabGroups",
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["get", "move", "query", "update"]
+      },
+      "events": {
+        "planned": ["onCreated", "onMoved", "onRemoved", "onUpdated"]
+      }
+    },
+    "tabCapture": {
+      "permission": "tabCapture",
+      "engines": ["chrome"],
+      "functions": {
+        "planned": ["capture", "getCapturedTabs", "getMediaStreamId"]
+      }
+    },
+    "desktopCapture": {
+      "permission": "desktopCapture",
+      "engines": ["chrome"],
+      "functions": {
+        "planned": ["chooseDesktopMedia", "cancelChooseDesktopMedia"]
+      }
+    },
+    "pageCapture": {
+      "permission": "pageCapture",
+      "engines": ["chrome"],
+      "functions": {
+        "planned": ["saveAsMHTML"]
+      }
+    },
+    "fontSettings": {
+      "permission": "fontSettings",
+      "engines": ["chrome"],
+      "functions": {
+        "planned": ["clearDefaultFixedFontSize", "clearDefaultFontSize", "clearFont", "clearMinimumFontSize", "getDefaultFixedFontSize", "getDefaultFontSize", "getFont", "getFontList", "getMinimumFontSize", "setDefaultFixedFontSize", "setDefaultFontSize", "setFont", "setMinimumFontSize"]
+      },
+      "events": {
+        "planned": ["onDefaultFixedFontSizeChanged", "onDefaultFontSizeChanged", "onFontChanged", "onMinimumFontSizeChanged"]
+      }
+    },
+    "omnibox": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["setDefaultSuggestion"]
+      },
+      "events": {
+        "planned": ["onInputStarted", "onInputChanged", "onInputEntered", "onInputCancelled", "onDeleteSuggestion"]
+      }
+    },
+    "declarativeContent": {
+      "permission": "declarativeContent",
+      "engines": ["chrome"],
+      "functions": {
+        "planned": []
+      }
+    },
+    "devtools": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["inspectedWindow.eval", "inspectedWindow.reload", "panels.create", "network.getHAR"]
+      },
+      "properties": {
+        "planned": ["inspectedWindow", "network", "panels"]
+      }
+    },
+    "dns": {
+      "permission": "dns",
+      "engines": ["firefox"],
+      "functions": {
+        "planned": ["resolve"]
+      }
+    },
+    "find": {
+      "permission": "find",
+      "engines": ["firefox"],
+      "functions": {
+        "planned": ["find", "highlightResults", "removeHighlighting"]
+      }
+    },
+    "browserSettings": {
+      "permission": "browserSettings",
+      "engines": ["firefox"],
+      "functions": {
+        "planned": []
+      },
+      "properties": {
+        "planned": ["allowPopupsForUserEvents", "cacheEnabled", "closeTabsByDoubleClick", "colorManagement", "contextMenuShowEvent", "ftpProtocolEnabled", "homepageOverride", "imageAnimationBehavior", "newTabPageOverride", "newTabPosition", "openBookmarksInNewTabs", "openSearchResultsInNewTabs", "openUrlbarResultsInNewTabs", "overrideContentColorScheme", "overrideDocumentColors", "tlsVersionRestrictionConfig", "useDocumentFonts", "verticalTabs", "webNotificationsDisabled", "zoomFullPage", "zoomSiteSpecific"]
+      }
+    },
+    "contextualIdentities": {
+      "permission": "contextualIdentities",
+      "engines": ["firefox"],
+      "functions": {
+        "planned": ["get", "query", "create", "update", "remove", "getSupportedColors", "getSupportedIcons", "move"]
+      },
+      "events": {
+        "planned": ["onCreated", "onRemoved", "onUpdated"]
+      }
+    },
+    "captivePortal": {
+      "permission": "captivePortal",
+      "engines": ["firefox"],
+      "functions": {
+        "planned": ["getState", "getLastChecked", "canonicalURL"]
+      },
+      "events": {
+        "planned": ["onConnectivityAvailable", "onStateChanged"]
+      }
+    },
+    "system": {
+      "permission": null,
+      "engines": ["chrome"],
+      "functions": {
+        "planned": ["cpu.getInfo", "memory.getInfo", "storage.getInfo", "display.getInfo"]
+      },
+      "perm_overrides": {
+        "cpu.getInfo": "system.cpu",
+        "memory.getInfo": "system.memory",
+        "storage.getInfo": "system.storage",
+        "display.getInfo": "system.display"
+      }
+    },
+    "power": {
+      "permission": "power",
+      "engines": ["chrome"],
+      "functions": {
+        "planned": ["requestKeepAwake", "releaseKeepAwake"]
+      }
+    },
+    "gcm": {
+      "permission": "gcm",
+      "engines": ["chrome"],
+      "functions": {
+        "planned": ["register", "unregister", "send"]
+      },
+      "mv": {}
+    },
+    "clipboard": {
+      "permission": "clipboardWrite",
+      "engines": ["firefox"],
+      "functions": {
+        "planned": ["setImageData"]
+      }
+    },
+    "contentScripts": {
+      "permission": null,
+      "engines": ["firefox"],
+      "functions": {
+        "planned": ["register"]
+      }
+    },
+    "dom": {
+      "permission": null,
+      "engines": ["chrome"],
+      "functions": {
+        "planned": ["openOrClosedShadowRoot"]
+      }
+    },
+    "pkcs11": {
+      "permission": "pkcs11",
+      "engines": ["firefox"],
+      "functions": {
+        "planned": ["getModuleSlots", "installModule", "isModuleInstalled", "uninstallModule"]
+      }
+    },
+    "publicSuffix": {
+      "permission": null,
+      "engines": ["chrome", "firefox"],
+      "functions": {
+        "planned": ["getDomain", "getKnownSuffix", "isKnownSuffix"]
+      }
+    }
+  }
+}

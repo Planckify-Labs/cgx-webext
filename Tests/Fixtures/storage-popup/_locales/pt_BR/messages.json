@@ -1,0 +1,4 @@
+{
+  "extName": { "message": "Popup de Armazenamento" },
+  "visitCount": { "message": "Ticks até agora: $COUNT$", "placeholders": { "count": { "content": "$1" } } }
+}
