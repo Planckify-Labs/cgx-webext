@@ -18,6 +18,9 @@ use std::rc::Rc;
 /// Events the core itself emits. A test checks this list against the registry.
 pub const EMITTED_EVENTS: &[&str] = &[
     "storage.onChanged",
+    "storage.local.onChanged",
+    "storage.sync.onChanged",
+    "storage.session.onChanged",
     "alarms.onAlarm",
     "permissions.onAdded",
     "permissions.onRemoved",
@@ -26,6 +29,27 @@ pub const EMITTED_EVENTS: &[&str] = &[
     // Delivered through the message bus as envelopes (see `bus`) rather than through `ExtensionHost::dispatch_event`.
     "runtime.onMessage",
     "runtime.onConnect",
+    // From browser snapshots (see `browser::diff`).
+    "tabs.onCreated",
+    "tabs.onUpdated",
+    "tabs.onRemoved",
+    "tabs.onActivated",
+    "tabs.onMoved",
+    "tabs.onAttached",
+    "tabs.onDetached",
+    "tabs.onHighlighted",
+    "tabs.onZoomChange",
+    "windows.onCreated",
+    "windows.onRemoved",
+    "windows.onFocusChanged",
+    "windows.onBoundsChanged",
+    // From the browser UI (see `browser_api`).
+    "action.onClicked",
+    "action.onUserSettingsChanged",
+    "pageAction.onClicked",
+    "contextMenus.onClicked",
+    "commands.onCommand",
+    "commands.onChanged",
 ];
 
 /// Everything the core keeps for one installed extension.
@@ -42,6 +66,17 @@ pub struct Extension {
     pub i18n: I18n,
     /// The extension's files, served by [`Dispatcher::serve`].
     pub files: Files,
+    /// The toolbar button's state (`action.*`, `browserAction.*`, `pageAction.*`).
+    pub action: crate::ui::ActionState,
+    /// Context-menu items (`contextMenus.*`, `menus.*`); kept across restarts.
+    pub menus: crate::ui::Menus,
+    /// Shortcut changes (`commands.update`, or the user's).
+    pub commands: crate::ui::Commands,
+    /// `runtime.setUninstallURL`.
+    pub uninstall_url: Option<String>,
+    /// How many of `manifest.content_scripts` come from the manifest; the rest are `scripting.registerContentScripts`.
+    pub static_content_scripts: usize,
+    pub registered_scripts: Vec<crate::browser_api::RegisteredScript>,
 }
 
 pub struct InstallOptions {
@@ -54,10 +89,14 @@ pub struct InstallOptions {
 
 #[derive(Clone)]
 pub struct Dispatcher {
-    host: Rc<dyn ExtensionHost>,
+    pub(crate) host: Rc<dyn ExtensionHost>,
     registry: Rc<Registry>,
-    extensions: Rc<RefCell<HashMap<String, Extension>>>,
-    bus: Rc<RefCell<Bus>>,
+    pub(crate) extensions: Rc<RefCell<HashMap<String, Extension>>>,
+    pub(crate) bus: Rc<RefCell<Bus>>,
+    /// The browser's windows and tabs, as last reported by the host (see `crate::browser`).
+    pub(crate) browser: Rc<RefCell<crate::browser::BrowserState>>,
+    /// Calls waiting for the host to run injected code; see `crate::browser_api`.
+    pub(crate) next_serial: Rc<std::cell::Cell<u64>>,
 }
 
 fn err(kind: ErrorKind, m: impl Into<String>) -> ApiError {
@@ -71,6 +110,8 @@ impl Dispatcher {
             registry: Rc::new(registry),
             extensions: Rc::new(RefCell::new(HashMap::new())),
             bus: Rc::new(RefCell::new(Bus::new())),
+            browser: Rc::new(RefCell::new(crate::browser::BrowserState::default())),
+            next_serial: Rc::new(std::cell::Cell::new(0)),
         }
     }
 
@@ -95,7 +136,32 @@ impl Dispatcher {
             // A broken locale file must not prevent installation; the message simply falls back.
             let _ = i18n.add_locale(locale, text);
         }
+        let read_json = |key: &str| self.host.read_storage(id, key).and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        // Event pages and service workers keep their menu items across restarts; persistent pages create them again.
+        let menus = if crate::browser_api::keeps_menus(&manifest) {
+            read_json("menus").map(|v| crate::ui::Menus::from_json(&v)).unwrap_or_default()
+        } else {
+            Default::default()
+        };
+        let mut commands = crate::ui::Commands::default();
+        let mut action = crate::ui::ActionState { pinned: manifest.action.is_some(), ..Default::default() };
+        if let Some(saved) = read_json("ui") {
+            if let Some(map) = saved.get("shortcuts").and_then(Value::as_object) {
+                commands.overrides = map.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
+            }
+            if let Some(p) = saved.get("pinned").and_then(Value::as_bool) {
+                action.pinned = p;
+            }
+        }
+        let static_content_scripts = manifest.content_scripts.len();
+        let registered_scripts = read_json("scripts").map(|v| crate::browser_api::RegisteredScript::list_from_json(&v)).unwrap_or_default();
         let ext = Extension {
+            action,
+            menus,
+            commands,
+            uninstall_url: None,
+            static_content_scripts,
+            registered_scripts,
             id: id.to_string(),
             local: load("local", local_quota),
             sync: load("sync", Quota::SYNC),
@@ -108,10 +174,22 @@ impl Dispatcher {
             manifest,
         };
         self.extensions.borrow_mut().insert(id.to_string(), ext);
+        self.rebuild_content_scripts(id);
     }
 
     pub fn uninstall(&self, id: &str) -> bool {
-        let removed = self.extensions.borrow_mut().remove(id).is_some();
+        let removed = self.extensions.borrow_mut().remove(id);
+        // runtime.setUninstallURL: the page opens once the extension is gone.
+        if let Some(url) = removed.as_ref().and_then(|e| e.uninstall_url.clone()) {
+            let call = ApiCall {
+                extension_id: id.into(),
+                function: "host.tabs.create".into(),
+                args: vec![json!({ "url": url, "active": true })],
+                caller: Caller::background(),
+            };
+            self.host.call_browser(&call, Box::new(|_| {}));
+        }
+        let removed = removed.is_some();
         let effects = self.bus.borrow_mut().drop_extension(id);
         self.run_effects(effects);
         removed
@@ -154,13 +232,27 @@ impl Dispatcher {
             sender["frameId"] = json!(frame);
         }
         if let Some(tab) = info.tab_id {
-            sender["tab"] = self.host.describe_tab(tab).unwrap_or_else(|| json!({ "id": tab }));
+            // The tab as the receiving extension may see it, from the browser's snapshot; the host's description only if the
+            // snapshot does not have it.
+            let mut state = self.browser.borrow().tab(tab).cloned();
+            // A document in the tab's top frame is the tab's page, even if the browser has not reported the navigation yet
+            // (content scripts connect at document_start, before the tab's snapshot shows the new URL).
+            if let (Some(t), Some(url), Some(0)) = (state.as_mut(), info.url.as_ref(), info.frame_id)
+                && t.url != *url
+            {
+                t.url = url.clone();
+                t.status = "loading".into();
+            }
+            sender["tab"] = state
+                .and_then(|t| self.with_visibility(&info.extension_id, |v| crate::browser::tab_json(&t, v)))
+                .or_else(|| self.host.describe_tab(tab))
+                .unwrap_or_else(|| json!({ "id": tab }));
         }
         sender
     }
 
     /// The calling context, which must be registered and belong to the extension named in the call.
-    fn calling_context(&self, call: &ApiCall) -> Result<ContextInfo, ApiError> {
+    pub(crate) fn calling_context(&self, call: &ApiCall) -> Result<ContextInfo, ApiError> {
         let id =
             call.caller.context_id.ok_or_else(|| err(ErrorKind::InvalidArguments, "this call did not come from a registered context"))?;
         match self.bus.borrow().context(id) {
@@ -294,7 +386,7 @@ impl Dispatcher {
     pub fn surface_for(&self, id: &str) -> Option<Value> {
         let exts = self.extensions.borrow();
         let ext = exts.get(id)?;
-        Some(self.registry.surface_json(ext.manifest.manifest_version, &|p| permission_granted(&ext.permissions, p)))
+        Some(self.registry.surface_json(ext.manifest.manifest_version, engine_of(ext), &|p| permission_granted(&ext.permissions, p)))
     }
 
     /// Everything a context needs at startup, as JSON: id, manifest, base URL and the visible API surface.
@@ -306,8 +398,10 @@ impl Dispatcher {
             "baseUrl": ext.base_url,
             "manifest": ext.manifest.raw,
             "uiLanguage": ext.i18n.ui_locale(),
+            // Chrome-style extensions get only `chrome`, Firefox-style ones `browser` too: extensions test `typeof browser`.
+            "dialect": if crate::browser_api::is_firefox(ext) { "firefox" } else { "chrome" },
             "syncFunctions": self.registry.sync_functions(),
-            "surface": self.registry.surface_json(ext.manifest.manifest_version, &|p| permission_granted(&ext.permissions, p)),
+            "surface": self.registry.surface_json(ext.manifest.manifest_version, engine_of(ext), &|p| permission_granted(&ext.permissions, p)),
         }))
     }
 
@@ -403,6 +497,9 @@ impl Dispatcher {
         if call.function.starts_with("__bus.") {
             return self.bus_internal(call, reply);
         }
+        if call.function == "__contentScripts.unregister" {
+            return reply(self.unregister_content_script(&call));
+        }
         match self.route(&call) {
             Err(e) => reply(Err(e)),
             Ok((member, _)) if member.status == Status::Delegated => {
@@ -464,6 +561,7 @@ impl Dispatcher {
             "tabs.sendMessage" => return self.tabs_send_message(call, reply),
             "runtime.connect" => self.connect(call, false),
             "tabs.connect" => self.connect(call, true),
+            n if crate::browser_api::handles(n) => return self.browser_api(member, call, reply),
             n if n.starts_with("storage.") => self.storage(member, call),
             n if n.starts_with("alarms.") => self.alarms(member, call),
             other => Err(err(ErrorKind::Unhandled, format!("registry marks '{other}' as handled by the core, but no handler exists"))),
@@ -471,12 +569,12 @@ impl Dispatcher {
         reply(result);
     }
 
-    fn with_ext<R>(&self, call: &ApiCall, f: impl FnOnce(&Extension) -> Result<R, ApiError>) -> Result<R, ApiError> {
+    pub(crate) fn with_ext<R>(&self, call: &ApiCall, f: impl FnOnce(&Extension) -> Result<R, ApiError>) -> Result<R, ApiError> {
         let exts = self.extensions.borrow();
         f(exts.get(&call.extension_id).ok_or_else(|| err(ErrorKind::Runtime, "Extension context invalidated."))?)
     }
 
-    fn with_ext_mut<R>(&self, call: &ApiCall, f: impl FnOnce(&mut Extension) -> Result<R, ApiError>) -> Result<R, ApiError> {
+    pub(crate) fn with_ext_mut<R>(&self, call: &ApiCall, f: impl FnOnce(&mut Extension) -> Result<R, ApiError>) -> Result<R, ApiError> {
         let mut exts = self.extensions.borrow_mut();
         f(exts.get_mut(&call.extension_id).ok_or_else(|| err(ErrorKind::Runtime, "Extension context invalidated."))?)
     }
@@ -550,6 +648,13 @@ impl Dispatcher {
             }
             // Listeners registered on `storage.onChanged` receive (changes, areaName).
             self.host.dispatch_event(&call.extension_id, "storage.onChanged", vec![changes_to_json(&changes), json!(area_name)]);
+            // Each area's own event gets the changes only.
+            let area_event = match area_name {
+                "local" => "storage.local.onChanged",
+                "sync" => "storage.sync.onChanged",
+                _ => "storage.session.onChanged",
+            };
+            self.host.dispatch_event(&call.extension_id, area_event, vec![changes_to_json(&changes)]);
         }
         result
     }
@@ -680,8 +785,13 @@ fn parse_tab_target(tab: Option<&Value>, options: Option<&Value>) -> Result<Targ
     Ok(Target::Tab { tab_id, frame_id })
 }
 
+/// The browser an extension was written for, which decides the API it sees.
+fn engine_of(ext: &Extension) -> crate::registry::Engine {
+    if crate::browser_api::is_firefox(ext) { crate::registry::Engine::Firefox } else { crate::registry::Engine::Chrome }
+}
+
 /// `contextMenus` and Firefox's `menus` are interchangeable.
-fn permission_granted(p: &PermissionState, permission: &str) -> bool {
+pub(crate) fn permission_granted(p: &PermissionState, permission: &str) -> bool {
     match permission {
         "contextMenus" | "menus" => p.has_api("contextMenus") || p.has_api("menus"),
         other => p.has_api(other),
@@ -893,7 +1003,10 @@ mod tests {
         assert_eq!(host.events.borrow().len(), before);
         call(&d, "storage.local.remove", vec![json!("a")]).unwrap();
         call(&d, "storage.local.clear", vec![]).unwrap();
-        assert_eq!(host.events.borrow().len(), before + 2);
+        // Each change fires storage.onChanged (changes, area) and the area's own onChanged (changes).
+        let events: Vec<(String, usize)> = host.events.borrow()[before..].iter().map(|(_, e, a)| (e.clone(), a.len())).collect();
+        let expected = [("storage.onChanged", 2), ("storage.local.onChanged", 1)];
+        assert_eq!(events, [expected, expected].concat().iter().map(|(e, n)| (e.to_string(), *n)).collect::<Vec<_>>());
     }
 
     #[test]
@@ -1033,11 +1146,16 @@ mod tests {
 
     #[test]
     fn delegated_calls_are_routed_with_canonical_names() {
-        let (d, host) = setup(r#"{"manifest_version":2,"name":"x","version":"1","permissions":["tabs","contextMenus"]}"#);
-        assert_eq!(call(&d, "tabs.query", vec![json!({})]).unwrap(), json!({"routed": "tabs.query"}));
-        assert_eq!(call(&d, "browserAction.setTitle", vec![json!({"title": "T"})]).unwrap(), json!({"routed": "action.setTitle"}));
-        assert_eq!(call(&d, "menus.create", vec![json!({})]).unwrap(), json!({"routed": "contextMenus.create"}));
-        assert_eq!(host.browser_calls.borrow().len(), 3);
+        let (d, host) =
+            setup(r#"{"manifest_version":2,"name":"x","version":"1","permissions":["cookies","contextMenus"],"browser_action":{}}"#);
+        assert_eq!(call(&d, "cookies.getAll", vec![json!({})]).unwrap(), json!({"routed": "cookies.getAll"}));
+        assert_eq!(host.browser_calls.borrow().len(), 1);
+        // Aliases reach the same state as the canonical names, which the core keeps itself.
+        call(&d, "browserAction.setTitle", vec![json!({"title": "T"})]).unwrap();
+        assert_eq!(call(&d, "action.getTitle", vec![json!({})]).unwrap(), json!("T"));
+        assert_eq!(call(&d, "menus.create", vec![json!({"id": "m", "title": "M"})]).unwrap(), json!("m"));
+        assert!(call(&d, "contextMenus.remove", vec![json!("m")]).is_ok());
+        assert_eq!(host.browser_calls.borrow().len(), 1);
         // Permission checks run before delegation.
         let (d2, host2) = setup(r#"{"manifest_version":3,"name":"x","version":"1"}"#);
         assert_eq!(kind(call(&d2, "cookies.getAll", vec![json!({})])), ErrorKind::PermissionDenied);
@@ -1048,7 +1166,7 @@ mod tests {
     #[test]
     fn menus_permission_alias() {
         let (d, _) = setup(r#"{"manifest_version":2,"name":"x","version":"1","permissions":["menus"]}"#);
-        assert!(call(&d, "contextMenus.create", vec![json!({})]).is_ok());
+        assert!(call(&d, "contextMenus.create", vec![json!({"title": "x"})]).is_ok());
     }
 
     #[test]

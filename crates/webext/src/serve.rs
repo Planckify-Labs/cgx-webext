@@ -7,7 +7,9 @@ use crate::resources::{Initiator, is_web_accessible};
 /// Where the shim and the bootstrap are served from. Only extension pages (the extension's own origin) may load them.
 pub const VIRTUAL_PREFIX: &str = "__cgx__/";
 /// The generated page that hosts background scripts and service workers.
-pub const BACKGROUND_PAGE: &str = "__cgx__/background.html";
+/// At the extension's root, where Firefox puts it, so that relative URLs in background scripts (`fetch('data/x.json')`,
+/// `setIcon({ path: 'icons/a.png' })`) resolve as they do in Chrome and Firefox.
+pub const BACKGROUND_PAGE: &str = "_generated_background_page.html";
 pub const SHIM_JS: &str = include_str!("../../../Shim/webext-shim.js");
 pub const BOOT_JS: &str = include_str!("../../../Shim/boot.js");
 
@@ -60,7 +62,27 @@ fn build_content_script_program(bundles: &[&serde_json::Value]) -> String {
     let mut out = String::from("(function (bridge) {\nvar module = { exports: {} };\n(function (module) {\n");
     out.push_str(SHIM_JS);
     out.push_str(
-        "\n})(module);\nvar shim = module.exports;\nvar init = JSON.parse(bridge.contextInit());\nif (!init) return;\nvar api = shim.createApi(init, {\n  call: function (name, args) { return bridge.call(name, JSON.stringify(args === undefined ? [] : args)).then(function (t) { return t === '' ? undefined : JSON.parse(t); }); },\n  callSync: function (name, args) { var t = bridge.callSync(name, JSON.stringify(args === undefined ? [] : args)); return t === '' ? undefined : JSON.parse(t); }\n});\nfunction addStyles(list) {\n  if (!list.length) return;\n  var apply = function () { var root = document.head || document.documentElement; if (!root) return false; list.forEach(function (css) { var s = document.createElement('style'); s.textContent = css; root.appendChild(s); }); return true; };\n  if (!apply()) document.addEventListener('readystatechange', function once() { if (apply()) document.removeEventListener('readystatechange', once); });\n}\n",
+        "\n})(module);\nvar shim = module.exports;\nvar init = JSON.parse(bridge.contextInit());\nif (!init) return;\n// Chrome defines an empty-looking `chrome` object on every page; scripts that Chrome extensions put in the page's world\n// test `chrome.runtime` on it. Pages where Chrome extensions run get one too. It carries no extension API.\nif (init.dialect !== 'firefox' && typeof globalThis.chrome === 'undefined') Object.defineProperty(globalThis, 'chrome', { value: {}, writable: true, configurable: true });\nvar api = shim.createApi(init, {\n  call: function (name, args) { return bridge.call(name, JSON.stringify(args === undefined ? [] : args)).then(function (t) { return t === '' ? undefined : JSON.parse(t); }); },\n  callSync: function (name, args) { var t = bridge.callSync(name, JSON.stringify(args === undefined ? [] : args)); return t === '' ? undefined : JSON.parse(t); }\n});\n// For code the extension injects later (scripting.executeScript, tabs.executeScript, insertCSS): the browser hands the API\n\
+// to injected code through these, which only the browser and this closure can reach.\n\
+bridge.__cgxApi = { chrome: api.chrome, browser: init.dialect === 'firefox' ? api.browser : undefined };\n\
+bridge.__cgxReport = function (token, value, error) {\n\
+  var send = function (ok, v) { bridge.call('__inject.result', JSON.stringify([token, ok, v])).catch(function () {}); };\n\
+  if (error !== undefined) { send(false, String(error && error.message || error)); return; }\n\
+  Promise.resolve(value).then(function (v) {\n\
+    var json; try { json = v === undefined ? undefined : JSON.parse(JSON.stringify(v)); } catch (e) { json = null; }\n\
+    send(true, json === undefined ? null : json);\n\
+  }, function (e) { send(false, String(e && e.message || e)); });\n\
+};\n\
+bridge.__cgxStyles = bridge.__cgxStyles || [];\n\
+bridge.__cgxCss = function (token, css, remove) {\n\
+  if (remove) {\n\
+    bridge.__cgxStyles = bridge.__cgxStyles.filter(function (s) { if (s.textContent === css) { s.remove(); return false; } return true; });\n\
+  } else {\n\
+    var s = document.createElement('style'); s.textContent = css; (document.head || document.documentElement).appendChild(s); bridge.__cgxStyles.push(s);\n\
+  }\n\
+  bridge.__cgxReport(token, null);\n\
+};\n\
+function addStyles(list) {\n  if (!list.length) return;\n  var apply = function () { var root = document.head || document.documentElement; if (!root) return false; list.forEach(function (css) { var s = document.createElement('style'); s.textContent = css; root.appendChild(s); }); return true; };\n  if (!apply()) document.addEventListener('readystatechange', function once() { if (apply()) document.removeEventListener('readystatechange', once); });\n}\n",
     );
     out.push_str("var stageOrder = ['document_start', 'document_end', 'document_idle'];\nvar stageStyles = [");
     out.push_str(&stages.iter().map(|(_, _, css)| format!("[{}]", css.join(", "))).collect::<Vec<_>>().join(", "));
@@ -80,7 +102,7 @@ fn build_content_script_program(bundles: &[&serde_json::Value]) -> String {
         }
     }
     out.push_str(
-        "}).call(globalThis, api.chrome, api.browser);\n\
+        "}).call(globalThis, api.chrome, init.dialect === 'firefox' ? api.browser : undefined);\n\
 var reached = -1;\n\
 function runStage(name) {\n\
   var target = stageOrder.indexOf(name);\n\
@@ -357,6 +379,13 @@ impl Dispatcher {
         serde_json::Value::Array(programs)
     }
 
+    /// The program that gives a document an extension's content-script context without running any of its content scripts,
+    /// for code injected with `scripting.executeScript` or `tabs.executeScript` into a document the extension has no
+    /// content scripts in. It is called the same way as [`Dispatcher::content_script_programs`]' programs.
+    pub fn content_script_setup_program(&self, _extension_id: &str) -> String {
+        build_content_script_program(&[])
+    }
+
     /// The extension whose base URL is the origin of `url`, if any.
     pub fn extension_for_url(&self, url: &str) -> Option<String> {
         let (base, _) = split_extension_url(url)?;
@@ -409,6 +438,19 @@ fn serve_from(ext: &Extension, base: &str, path: &str, initiator: Option<&str>) 
     }
 
     let path = if path.is_empty() { "index.html" } else { path };
+    // The generated page that runs background scripts, unless the extension has a file of that name.
+    if path == BACKGROUND_PAGE && ext.files.get(path).is_none() {
+        if !same {
+            return Served::error(403, &ext.id, "forbidden");
+        }
+        return Served {
+            status: 200,
+            mime: mime_for_path("x.html").into(),
+            csp: Some(ext.manifest.csp_extension_pages.clone()),
+            extension_id: ext.id.clone(),
+            body: inject_boot_scripts(&generate_background_page(&ext.manifest)).into_bytes(),
+        };
+    }
     if !is_web_accessible(&ext.manifest, path, &who) {
         return Served::error(403, &ext.id, "This resource is not web accessible");
     }
@@ -585,7 +627,7 @@ mod tests {
         d.install(id, manifest, InstallOptions { base_url: BASE.into(), locales: vec![], files });
 
         let url = d.background_url(id).unwrap();
-        assert_eq!(url, format!("{BASE}__cgx__/background.html"));
+        assert_eq!(url, format!("{BASE}_generated_background_page.html"));
         assert!(d.is_background_url(id, &url) && d.is_background_url(id, &format!("{url}?x=1#y")));
         assert!(!d.is_background_url(id, &format!("{BASE}popup.html")));
         let served = d.serve(&url, None).unwrap();

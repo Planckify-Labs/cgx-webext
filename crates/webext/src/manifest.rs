@@ -205,7 +205,7 @@ pub fn looks_like_host_permission(s: &str) -> bool {
 
 /// The default Content-Security-Policy for extension pages.
 pub fn default_extension_csp() -> &'static str {
-    "script-src 'self'; object-src 'self'"
+    "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
 }
 
 /// Removes `//` and `/* */` comments outside strings, as accepted by both browsers' manifest parsers, and a UTF-8 BOM.

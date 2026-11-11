@@ -39,6 +39,8 @@
   // Constant properties. The storage quotas must equal the ones the core enforces (checked by a Rust test).
   const CONSTANTS = {
     'tabs.TAB_ID_NONE': -1,
+    // Extensions do not run in private windows yet, so no context is an incognito one.
+    'extension.inIncognitoContext': false,
     'windows.WINDOW_ID_NONE': -1,
     'windows.WINDOW_ID_CURRENT': -2,
     'storage.sync.QUOTA_BYTES': 102400,
@@ -67,6 +69,50 @@
       return returned && typeof returned.then === 'function' ? returned.then(unwrapMessageResult) : returned;
     };
   }
+
+  // ---- Arguments that do not survive JSON ---------------------------------------------------------------------------
+
+  function base64(bytes) {
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, Array.prototype.slice.call(bytes, i, i + 0x8000));
+    if (typeof btoa === 'function') return btoa(binary);
+    return Buffer.from(binary, 'binary').toString('base64'); // Node, for tests.
+  }
+
+  function isImageData(v) {
+    return !!v && typeof v === 'object' && typeof v.width === 'number' && typeof v.height === 'number' && v.data && typeof v.data.length === 'number';
+  }
+
+  /** ImageData objects (setIcon) become { width, height, data: base64 RGBA }. */
+  function encodeIconDetails(details) {
+    if (!details || typeof details !== 'object' || !details.imageData) return details;
+    const out = Object.assign({}, details);
+    const one = (img) => ({ width: img.width, height: img.height, data: base64(img.data) });
+    if (isImageData(details.imageData)) out.imageData = one(details.imageData);
+    else {
+      out.imageData = {};
+      for (const [size, img] of Object.entries(details.imageData)) if (isImageData(img)) out.imageData[size] = one(img);
+    }
+    return out;
+  }
+
+  /** scripting.executeScript({ func }) sends the function's source; it runs in the page, not here. */
+  function encodeInjection(injection) {
+    if (!injection || typeof injection !== 'object') return injection;
+    const func = injection.func || injection.function;
+    if (typeof func !== 'function') return injection;
+    const out = Object.assign({}, injection);
+    delete out.func;
+    delete out.function;
+    out.__funcSource = Function.prototype.toString.call(func);
+    return out;
+  }
+
+  const ARGUMENT_ENCODERS = {
+    'action.setIcon': (args) => [encodeIconDetails(args[0])].concat(args.slice(1)),
+    'pageAction.setIcon': (args) => [encodeIconDetails(args[0])].concat(args.slice(1)),
+    'scripting.executeScript': (args) => [encodeInjection(args[0])].concat(args.slice(1)),
+  };
 
   function trimTrailingUndefined(args) {
     let n = args.length;
@@ -109,7 +155,7 @@
   function createApi(init, bridge, options) {
     const opts = options || {};
     const log = opts.console || (typeof console !== 'undefined' ? console : { error() {}, warn() {} });
-    const ctx = { init, bridge, events: new Map(), lastError: undefined, ports: new Map(), portSeq: 0 };
+    const ctx = { init, bridge, events: new Map(), lastError: undefined, ports: new Map(), portSeq: 0, menuHandlers: new Map(), menuSeq: 0 };
     const syncFunctions = new Set(init.syncFunctions || []);
     const mv3 = init.manifest && init.manifest.manifest_version === 3;
 
@@ -161,14 +207,64 @@
       return tree;
     }
 
+    function menuKey(id) {
+      return typeof id === 'number' ? `n:${id}` : `s:${id}`;
+    }
+
+    /**
+     * contextMenus.create returns the item's id at once, and takes an optional callback in both namespaces (Firefox's
+     * menus.create does too). Items created without an id get one here. `onclick` stays in this context and runs when the
+     * item is clicked.
+     */
+    function menuCreate(full) {
+      return function (createProperties, callback) {
+        const props = Object.assign({}, createProperties || {});
+        if (props.id === undefined || props.id === null) {
+          // Unique across the extension's contexts: each context numbers from its own block.
+          props.id = (Number(ctx.init.contextId) || 0) * 100000 + ++ctx.menuSeq;
+          props.__generatedId = true;
+        }
+        const onclick = typeof props.onclick === 'function' ? props.onclick : null;
+        delete props.onclick;
+        if (onclick) ctx.menuHandlers.set(menuKey(props.id), onclick);
+        bridge.call(full, [props]).then(
+          () => {
+            if (typeof callback === 'function') safely(callback, []);
+          },
+          (error) => {
+            if (onclick) ctx.menuHandlers.delete(menuKey(props.id));
+            const message = error && error.message ? error.message : String(error);
+            if (typeof callback === 'function') {
+              ctx.lastError = { message };
+              try { safely(callback, []); } finally { ctx.lastError = undefined; }
+            } else {
+              log.error(`Unchecked runtime.lastError: ${message}`);
+            }
+          }
+        );
+        return props.id;
+      };
+    }
+
+    // Firefox's contentScripts.register resolves to a RegisteredContentScript.
+    function contentScriptsRegister(options) {
+      return bridge.call('contentScripts.register', [options]).then((result) => ({
+        unregister: () => bridge.call('__contentScripts.unregister', [result && result.id]).then(() => undefined),
+      }));
+    }
+
     function makeFunction(style, full) {
+      if (full === 'contextMenus.create') return menuCreate(full);
+      if (full === 'contentScripts.register') return contentScriptsRegister;
       if (full === 'runtime.connect') return (...args) => connect('runtime', args);
       if (full === 'tabs.connect') return (...args) => connect('tabs', args);
       if (LOCAL[full]) return LOCAL[full](ctx);
       if (syncFunctions.has(full)) {
         return (...args) => bridge.callSync(full, trimTrailingUndefined(args));
       }
-      const generic = function (...args) {
+      const encode = ARGUMENT_ENCODERS[full];
+      const generic = function (...rawArgs) {
+        const args = encode ? encode(rawArgs.slice()) : rawArgs;
         if (style === 'browser') {
           if (typeof args[args.length - 1] === 'function') {
             throw new TypeError(`browser.${full}: callbacks are not supported; use the returned Promise`);
@@ -349,6 +445,10 @@
 
       /** Delivers a browser event to this context's listeners. Returns the number of listeners called. */
       dispatchEvent(name, args) {
+        if (name === 'contextMenus.onClicked' && args && args[0]) {
+          const onclick = ctx.menuHandlers.get(menuKey(args[0].menuItemId));
+          if (onclick) safely(onclick, args);
+        }
         const entry = ctx.events.get(name);
         if (!entry) return 0;
         let called = 0;

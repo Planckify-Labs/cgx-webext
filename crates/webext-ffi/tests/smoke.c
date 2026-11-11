@@ -159,7 +159,8 @@ int main(int argc, char** argv)
     Reply r;
     call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"storage.local.set\",\"args\":[{\"k\":42}]}");
     CHECK(r.called == 1 && r.ok);
-    CHECK(strstr(host.last_event, "storage.onChanged") && strstr(host.last_event, "\"newValue\":42"));
+    /* storage.onChanged fires, then the area's own storage.local.onChanged. */
+    CHECK(strstr(host.last_event, "storage.local.onChanged") && strstr(host.last_event, "\"newValue\":42"));
     CHECK(strstr(host.stored, "\"k\":42"));
     call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"storage.local.get\",\"args\":[\"k\"]}");
     CHECK(r.called == 1 && r.ok && strcmp(r.json, "{\"k\":42}") == 0);
@@ -173,15 +174,27 @@ int main(int argc, char** argv)
     CHECK(r.called == 1 && !r.ok);
 
     /* Delegated call is answered asynchronously by the host. */
-    call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"tabs.query\",\"args\":[{}]}");
+    call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"cookies.getAll\",\"args\":[{}]}");
     CHECK(r.called == 0 && host.pending_browser_token != 0);
-    webext_complete(h, host.pending_browser_token, true, S("[{\"id\":1}]"));
-    CHECK(r.called == 1 && r.ok && strcmp(r.json, "[{\"id\":1}]") == 0);
+    webext_complete(h, host.pending_browser_token, true, S("[{\"name\":\"c\"}]"));
+    CHECK(r.called == 1 && r.ok && strcmp(r.json, "[{\"name\":\"c\"}]") == 0);
 
     /* ...or fails. */
-    call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"tabs.query\",\"args\":[{}]}");
+    call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"cookies.getAll\",\"args\":[{}]}");
     webext_complete(h, host.pending_browser_token, false, S("No such tab"));
     CHECK(r.called == 1 && !r.ok && strstr(r.json, "No such tab"));
+
+    /* The browser reports its tabs; the core answers tabs.query from them and fires tabs.onCreated. */
+    WebExtString state = webext_host_event(h, S("browserState"),
+        S("{\"windows\":[{\"id\":1,\"focused\":true,\"tabs\":[{\"id\":7,\"url\":\"https://example.com/\",\"active\":true}]}]}"));
+    CHECK(state.ptr && strcmp((const char*)state.ptr, "null") == 0);
+    webext_string_free(state);
+    CHECK(strstr(host.last_event, "tabs.onCreated") || strstr(host.last_event, "tabs.onActivated") || strstr(host.last_event, "windows.on"));
+    call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"tabs.query\",\"args\":[{\"active\":true}]}");
+    CHECK(r.called == 1 && r.ok && strstr(r.json, "\"id\":7") && strstr(r.json, "https://example.com/"));
+    WebExtString bad_event = webext_host_event(h, S("browserState"), S("{not json"));
+    CHECK(bad_event.ptr && strstr((const char*)bad_event.ptr, "error"));
+    webext_string_free(bad_event);
 
     /* Optional permission prompt answered later. */
     call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"permissions.request\",\"args\":[{\"permissions\":[\"history\"]}]}");

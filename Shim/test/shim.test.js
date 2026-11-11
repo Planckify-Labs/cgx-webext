@@ -217,3 +217,40 @@ test('constants are defined where the namespace is visible', () => {
   const { api: limited } = make({ surface: { runtime: { functions: [], events: [], properties: [] } } });
   assert.equal(limited.chrome.tabs, undefined);
 });
+
+test('contextMenus.create returns the id at once, names unnamed items, and runs onclick in its own context', async () => {
+  const { api, calls } = make();
+  const clicks = [];
+  const named = api.chrome.contextMenus.create({ id: 'look-up', title: 'Look up', onclick: (info, tab) => clicks.push([info.menuItemId, tab.id]) });
+  assert.equal(named, 'look-up');
+  const unnamed = api.browser.menus.create({ title: 'Other' }, () => {});
+  assert.equal(typeof unnamed, 'number');
+  await Promise.resolve();
+  assert.equal(calls[0].name, 'contextMenus.create');
+  assert.equal(calls[0].args[0].onclick, undefined, 'functions do not cross to the browser');
+  assert.equal(calls[1].args[0].__generatedId, true);
+  api.dispatchEvent('contextMenus.onClicked', [{ menuItemId: 'look-up' }, { id: 4 }]);
+  api.dispatchEvent('contextMenus.onClicked', [{ menuItemId: unnamed }, { id: 4 }]);
+  assert.deepEqual(clicks, [['look-up', 4]]);
+});
+
+test('contextMenus.create reports errors through lastError in its callback', async () => {
+  const { api } = make({ bridge: { call: async () => { throw new Error('Cannot create item with duplicate id x'); }, callSync() {} } });
+  let seen;
+  api.chrome.contextMenus.create({ id: 'x', title: 'X' }, () => { seen = api.chrome.runtime.lastError && api.chrome.runtime.lastError.message; });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(seen, 'Cannot create item with duplicate id x');
+});
+
+test('setIcon sends ImageData as base64 RGBA, and executeScript sends func as source', async () => {
+  const { api, calls } = make();
+  const pixels = { width: 1, height: 1, data: new Uint8ClampedArray([255, 0, 0, 255]) };
+  await api.browser.action.setIcon({ imageData: pixels, tabId: 3 });
+  await api.chrome.action.setIcon({ imageData: { 16: pixels } });
+  assert.deepEqual(calls[0].args[0], { imageData: { width: 1, height: 1, data: '/wAA/w==' }, tabId: 3 });
+  assert.deepEqual(calls[1].args[0].imageData['16'], { width: 1, height: 1, data: '/wAA/w==' });
+  await api.chrome.scripting.executeScript({ target: { tabId: 1 }, func: function add(a, b) { return a + b; }, args: [1, 2] });
+  assert.equal(calls[2].args[0].__funcSource, 'function add(a, b) { return a + b; }');
+  assert.equal(calls[2].args[0].func, undefined);
+  assert.deepEqual(calls[2].args[0].args, [1, 2]);
+});

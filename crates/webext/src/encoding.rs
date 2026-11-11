@@ -26,6 +26,11 @@ pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
     ENGINE.decode(cleaned).ok()
 }
 
+/// Standard base64 with padding.
+pub fn base64_encode(data: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
 /// Chrome extension IDs write 16 bytes as 32 letters in the alphabet `a`..=`p`.
 pub fn extension_id_from_bytes(bytes: &[u8]) -> String {
     bytes.iter().take(16).flat_map(|b| [(b'a' + (b >> 4)) as char, (b'a' + (b & 0xF)) as char]).collect()

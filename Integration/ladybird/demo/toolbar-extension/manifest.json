@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Ladybird Extension Test",
+  "version": "1.0",
+  "description": "Exercises the toolbar button, popup, badge, context menus, shortcuts, tabs and scripting in Ladybird.",
+  "icons": { "16": "icon16.png", "32": "icon32.png", "48": "icon48.png", "128": "icon128.png" },
+  "action": {
+    "default_title": "Ladybird Extension Test",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icon16.png", "32": "icon32.png" }
+  },
+  "options_page": "options.html",
+  "permissions": ["storage", "contextMenus", "scripting", "activeTab", "tabs"],
+  "background": { "service_worker": "background.js" },
+  "commands": {
+    "_execute_action": { "suggested_key": { "default": "Alt+Shift+E" } },
+    "mark-page": { "suggested_key": { "default": "Alt+Shift+M" }, "description": "Outline the page" }
+  }
+}

@@ -61,19 +61,45 @@ new engine work in `LibWeb/Bindings` and `LibWeb/HTML/Scripting` (`WindowRealm`)
 first. Do **not** ship extensions by running content scripts in the main world: that is neither secure nor compatible.
 
 ### 5. Messaging
-`runtime.sendMessage`, `tabs.sendMessage` and `runtime.onMessage` are `delegated`: you receive an `ApiCall`, route it to the
-right context(s), call that context's `api.deliverMessage(message, sender)` (resolves `{handled, response}`), and complete the
-call with the response. Implement `sender` (`id`, `tab`, `frameId`, `url`, `origin`). **Ports** (`runtime.connect`,
-`onConnect`, `tabs.connect`) are *planned* in the core and are the most common blocker among real extensions
-([COMPATIBILITY.md](COMPATIBILITY.md)).
+`runtime.sendMessage`, `tabs.sendMessage`, `runtime.connect`, `tabs.connect` and their events are implemented by the core's
+message bus (`bus.rs`): it builds `sender`, finds the receiving contexts (by tab and frame for `tabs.*`), and settles replies
+and ports. The browser only registers each context (`context_created` with its tab and frame) and delivers the envelopes the
+core produces (`deliver_to_context`), in order, to that context's `api.handleHostMessage`.
 
-### 6. Browser-UI APIs (`delegated`)
-`tabs`, `windows`, `action`, `contextMenus`, `cookies`, `scripting`: you receive validated calls (permission and manifest
-version already checked, aliases such as `browserAction` → `action` already resolved) and implement them against your
-tab and window model. The authoritative list is `webext-coverage registry` / `docs/COVERAGE.md`, filtered to `delegated`.
-`activeTab` grants are tracked by `PermissionState::grant_active_tab` (not yet exposed through the C ABI; add it when you
-implement the toolbar action).
-*Ladybird:* tabs/views are `LibWebView/ViewImplementation`, `Application`; cookies `LibWebView/CookieJar`.
+### 6. Browser-UI APIs: report state, run primitives
+
+The browser does **not** implement `tabs.query`, `windows.getAll`, `tabs.onUpdated`, `action.setBadgeText`,
+`contextMenus.create` or `scripting.executeScript` itself. The core implements them, with each browser's argument handling,
+permission trimming and error messages. The browser has three duties:
+
+1. **Report its windows and tabs.** Call `webext_host_event(h, "browserState", snapshot)` whenever a window or tab changes
+   (comparing a small snapshot a few times a second is enough; Ladybird does that), and before answering a primitive that
+   changed something. The snapshot is `{windows:[{id, type, state, focused, incognito, left, top, width, height, tabs:[{id,
+   active, pinned, url, title, favIconUrl, status, audible, muted, width, height, openerTabId, zoom}]}], lastFocusedWindowId}`.
+   The core diffs consecutive snapshots and fires `tabs.onCreated/onUpdated/onActivated/onMoved/onAttached/onDetached/
+   onRemoved/onHighlighted/onZoomChange` and `windows.onCreated/onRemoved/onFocusChanged/onBoundsChanged`, trimmed per
+   extension (no `url`/`title` without the `tabs` permission, host permission or an `activeTab` grant). Tab ids must be the
+   ids you give contexts in `context_created` (`tabId`), so that `tabs.sendMessage` reaches the tab's content scripts.
+2. **Run primitives.** `call_browser` receives calls named `host.*` with one object argument, already validated:
+   `host.tabs.create/update/remove/reload/navigateHistory/duplicate/move/discard/setZoom/capture/frames`,
+   `host.scripting.inject`, `host.windows.create/update/remove`, `host.action.openPopup`, `host.runtime.reload`. The table
+   with every argument and result is at the top of `crates/webext/src/browser_api.rs`. Calls without the `host.` prefix
+   (`cookies.*`, ...) are APIs that are still delegated wholesale; answer them with "<name> is not implemented yet".
+3. **Draw the extension UI and report what the user does.** `webext_host_event` with `uiState` (toolbar buttons: icon,
+   title, badge text and colours, popup URL, enabled, pinned, site access), `contextMenuItems` (the extension items for a
+   context menu about to open), `commands` (shortcuts to register). Report `actionClicked` (answer: a popup URL to open, or
+   the core already fired `action.onClicked`), `contextMenuClicked`, `command`, `setActionPinned`. Each of these grants
+   `activeTab` for the tab as the browsers do. The core asks you to redraw with the event `__ui.changed` (through
+   `dispatch_event`; it is not for extension contexts).
+
+`host.scripting.inject` asks you to evaluate `code` as a classic script of each listed frame's document, in the extension's
+content-script context (create it first with `setupProgram`, a content-script program without scripts, if the document has
+none), and to hand the completion value to the context's reporter; see `bridge.__cgxReport` in `crates/webext/src/serve.rs`
+and `ExtensionBridge::run_injection` in Ladybird.
+
+*Ladybird:* `UI/Qt/ExtensionsUI.cpp` (snapshot, primitives, toolbar, panel, popups, shortcuts),
+`LibWebView/WebContentPage.cpp` (frames and injection across processes), `LibWebView/ViewImplementation.cpp` (extension
+items in page context menus), `LibWeb/Internals/ExtensionBridge.cpp` (running injected code).
 
 ### 7. Network APIs (`planned`)
 `declarativeNetRequest` (what MV3 content blockers use) and `webRequest`, including blocking handlers (what uBlock Origin
@@ -81,10 +107,11 @@ MV2 uses). Both need hooks in the network stack (`Services/RequestServer`). Lady
 (`LibWeb/ContentBlocker`, built on the `adblock` crate) is a natural engine for translating DNR rules. Not started here.
 
 ### 8. User interface
-An extensions manager (install from file, enable/disable, remove, show permissions), toolbar buttons (from `info.action`),
-popup hosting (`info.action.popup` in a small window at the extension origin), options pages, permission prompts for
-`request_permissions`, and an install prompt listing `info.permissions`/`hostPermissions`. Ladybird has Qt and Android frontends
-(`UI/Qt`, `UI/Android`); each needs its own.
+Toolbar buttons, the extensions panel and popups are built on `uiState` (section 6). Popup pages get `isPopup` in their init
+data; `Shim/boot.js` then reports the page's preferred size (`__ui.popupSize [width, height]`, which the browser clamps to
+25×25..800×600) and routes `window.close()` to `__ui.closePopup`. Still to build: an extensions manager page
+(enable/disable, permissions, errors, load unpacked), and a prompt for `request_permissions`. Ladybird has Qt and Android
+frontends (`UI/Qt`, `UI/Android`); each needs its own.
 
 ### 9. Signatures and policy
 `Package::verify_crx3` builds the exact signed bytes and checks that a signing key hashes to the declared ID; you supply the

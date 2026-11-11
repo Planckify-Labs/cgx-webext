@@ -273,7 +273,7 @@ pub fn manifest_features(m: &Manifest) -> Vec<FeatureUse> {
         add("blocking webRequest", Status::Planned, "needs request interception in the network stack");
     }
     if !m.commands.is_empty() {
-        add("keyboard commands", Status::Planned, "");
+        add("keyboard commands", Status::Delegated, "the core keeps the shortcuts; the host registers them");
     }
     if !m.url_overrides.is_empty() {
         add("chrome_url_overrides", Status::Planned, "");
@@ -453,11 +453,11 @@ mod tests {
     fn resolves_longest_member_prefix_and_classifies() {
         let r = report(
             M,
-            "chrome.storage.local.get.bind(x); chrome.tabs.query({}); chrome.runtime.lastError.message; chrome.downloads.download({});",
+            "chrome.storage.local.get.bind(x); chrome.cookies.get({}); chrome.runtime.lastError.message; chrome.downloads.download({});",
         );
         let status = |n: &str| r.apis.iter().find(|a| a.name == n).map(|a| a.support.clone());
         assert_eq!(status("storage.local.get"), Some(Support::Known(Status::Implemented)));
-        assert_eq!(status("tabs.query"), Some(Support::Known(Status::Delegated)));
+        assert_eq!(status("cookies.get"), Some(Support::Known(Status::Delegated)));
         assert_eq!(status("runtime.lastError"), Some(Support::Known(Status::Implemented)));
         assert_eq!(status("downloads.download"), Some(Support::Known(Status::Planned)));
         assert_eq!(r.verdict, Verdict::Blocked);
@@ -467,8 +467,8 @@ mod tests {
     #[test]
     fn verdicts() {
         assert_eq!(report(M, "chrome.storage.local.set({}); chrome.i18n.getMessage('x')").verdict, Verdict::Ready);
-        assert_eq!(report(M, "chrome.storage.local.set({}); chrome.tabs.query({})").verdict, Verdict::NeedsHost);
-        let r = report(M, "chrome.storage.local.set({}); chrome.tabs.query({})");
+        assert_eq!(report(M, "chrome.storage.local.set({}); chrome.cookies.get({})").verdict, Verdict::NeedsHost);
+        let r = report(M, "chrome.storage.local.set({}); chrome.cookies.get({})");
         assert!((r.core_percent - 50.0).abs() < 1e-9 && (r.with_host_percent - 100.0).abs() < 1e-9);
         // Nothing used at all is trivially ready.
         assert_eq!(report(M, "console.log(1)").verdict, Verdict::Ready);

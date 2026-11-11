@@ -46,6 +46,42 @@ index 85099c3a..e4756554 100644
      Internals/WebUI.cpp
      IntersectionObserver/IntersectionObserver.cpp
      IntersectionObserver/IntersectionObserverEntry.cpp
+diff --git a/Libraries/LibWeb/ContentSecurityPolicy/FetchIntegration.cpp b/Libraries/LibWeb/ContentSecurityPolicy/FetchIntegration.cpp
+index f3efd21e..60f632cc 100644
+--- a/Libraries/LibWeb/ContentSecurityPolicy/FetchIntegration.cpp
++++ b/Libraries/LibWeb/ContentSecurityPolicy/FetchIntegration.cpp
+@@ -91,8 +91,21 @@ void report_content_security_policy_violations_for_request(Fetch::Infrastructure
+ }
+ 
+ // https://w3c.github.io/webappsec-csp/#should-block-request
++// AD-HOC (cgx-webext): Files of browser extensions are not governed by the page's policy, as in Chrome and Firefox: content
++//                      scripts insert <link> and <script> elements for their web-accessible files into pages whose CSP
++//                      does not list the extension. Whether the page may have the file is decided when it is served
++//                      (web_accessible_resources).
++static bool is_extension_resource(Fetch::Infrastructure::Request const& request)
++{
++    auto const& scheme = request.current_url().scheme();
++    return scheme == "chrome-extension"sv || scheme == "moz-extension"sv;
++}
++
+ Directives::Directive::Result should_request_be_blocked_by_content_security_policy(Fetch::Infrastructure::Request const& request, ViolationReporter const& report_violation)
+ {
++    if (is_extension_resource(request))
++        return Directives::Directive::Result::Allowed;
++
+     // 1. Let CSP list be request’s policy container's CSP list.
+     auto const& csp_list = request.policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>()->csp_list;
+ 
+@@ -126,6 +139,9 @@ Directives::Directive::Result should_request_be_blocked_by_content_security_poli
+ // https://w3c.github.io/webappsec-csp/#should-block-response
+ Directives::Directive::Result should_response_to_request_be_blocked_by_content_security_policy(Fetch::Infrastructure::Response const& response, Fetch::Infrastructure::Request const& request, ViolationReporter const& report_violation)
+ {
++    if (is_extension_resource(request))
++        return Directives::Directive::Result::Allowed;
++
+     // 1. Let CSP list be request’s policy container's CSP list.
+     auto const& csp_list = request.policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>()->csp_list;
+ 
 diff --git a/Libraries/LibWeb/DOM/Document.cpp b/Libraries/LibWeb/DOM/Document.cpp
 index 74c36d01..3c96f61e 100644
 --- a/Libraries/LibWeb/DOM/Document.cpp
@@ -138,10 +174,25 @@ index e331d987..2ba118b8 100644
  
  template<>
 diff --git a/Libraries/LibWeb/Fetch/Fetching/Fetching.cpp b/Libraries/LibWeb/Fetch/Fetching/Fetching.cpp
-index f1ae7f22..586b4907 100644
+index f1ae7f22..13422471 100644
 --- a/Libraries/LibWeb/Fetch/Fetching/Fetching.cpp
 +++ b/Libraries/LibWeb/Fetch/Fetching/Fetching.cpp
-@@ -1592,6 +1592,35 @@ GC::Ref<PendingResponse> scheme_fetch(JS::Realm& realm, Infrastructure::FetchPar
+@@ -708,6 +708,14 @@ GC::Ptr<PendingResponse> main_fetch(JS::Realm& realm, Infrastructure::FetchParam
+             return scheme_fetch(realm, *fetch_params);
+         }
+ 
++        // AD-HOC (cgx-webext): Files of browser extensions may be fetched from other origins, as in Chrome and Firefox:
++        //                      content scripts fetch their web-accessible files from the page. Whether the requester may
++        //                      have the file is decided when the browser serves it (web_accessible_resources).
++        if (request->current_url().scheme().is_one_of("chrome-extension"sv, "moz-extension"sv)) {
++            request->set_response_tainting(Infrastructure::Request::ResponseTainting::Basic);
++            return scheme_fetch(realm, *fetch_params);
++        }
++
+         // -> request’s current URL’s scheme is not an HTTP(S) scheme
+         // AD-HOC: We allow CORS requests for resource:// URLs from opaque origins to enable requesting JS modules from internal pages.
+         if (!Infrastructure::is_http_or_https_scheme(request->current_url().scheme())
+@@ -1592,6 +1600,35 @@ GC::Ref<PendingResponse> scheme_fetch(JS::Realm& realm, Infrastructure::FetchPar
          response->set_body(Infrastructure::byte_sequence_as_response_body(data_url_struct.value().body));
          return PendingResponse::create(fetch_params, response);
      }
@@ -191,10 +242,10 @@ index 7ebbe4f3..b05d10bf 100644
  class WebUI;
 diff --git a/Libraries/LibWeb/Internals/ExtensionBridge.cpp b/Libraries/LibWeb/Internals/ExtensionBridge.cpp
 new file mode 100644
-index 00000000..d0017042
+index 00000000..78cc5a81
 --- /dev/null
 +++ b/Libraries/LibWeb/Internals/ExtensionBridge.cpp
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,276 @@
 +/*
 + * Copyright (c) 2026, cgx-webext contributors
 + *
@@ -280,10 +331,6 @@ index 00000000..d0017042
 +    if (programs.is_error() || !programs.value().is_array())
 +        return;
 +
-+    auto& settings = document.relevant_settings_object();
-+    auto& realm = settings.realm();
-+    auto& vm = realm.vm();
-+
 +    programs.value().as_array().for_each([&](JsonValue const& entry) {
 +        if (!entry.is_object())
 +            return;
@@ -291,33 +338,132 @@ index 00000000..d0017042
 +        auto program = entry.as_object().get_string("program"sv);
 +        if (!extension_id.has_value() || !program.has_value() || document.extension_bridge(*extension_id))
 +            return;
-+
-+        auto bridge = create(*window, *extension_id);
-+        document.set_extension_bridge(*extension_id, bridge);
-+
-+        // The program is a function expression; evaluating it yields the function to call with the bridge. Running it as
-+        // a classic script of the document does not go through the page's CSP, which governs the page's own scripts.
-+        auto filename = ByteString::formatted("extension://{}/content-scripts", *extension_id);
-+        auto script = HTML::ClassicScript::create(filename, Utf16String::from_utf8(*program), settings, document.url());
-+        auto completion = script->run(HTML::ClassicScript::RethrowErrors::No);
-+        if (completion.is_error() || !completion.value().is_function()) {
-+            dbgln("Content scripts of extension {} could not be set up", *extension_id);
-+            return;
-+        }
-+
-+        HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
-+        auto bridge_value = Bindings::wrap(Bindings::host_defined_wrapper_world(realm), realm, bridge);
-+        auto result = JS::call(vm, completion.value().as_function(), JS::js_undefined(), bridge_value);
-+        if (result.is_error())
-+            dbgln("Content scripts of extension {} threw while starting", *extension_id);
++        (void)start_program(document, *extension_id, *program);
 +    });
++}
++
++GC::Ptr<ExtensionBridge> ExtensionBridge::start_program(DOM::Document& document, String const& extension_id, String const& program)
++{
++    auto window = document.window();
++    if (!window)
++        return {};
++    auto& settings = document.relevant_settings_object();
++    auto& realm = settings.realm();
++    auto& vm = realm.vm();
++
++    auto bridge = create(*window, extension_id);
++    document.set_extension_bridge(extension_id, bridge);
++
++    // The program is a function expression; evaluating it yields the function to call with the bridge. Running it as
++    // a classic script of the document does not go through the page's CSP, which governs the page's own scripts.
++    auto filename = ByteString::formatted("extension://{}/content-scripts", extension_id);
++    auto script = HTML::ClassicScript::create(filename, Utf16String::from_utf8(program), settings, document.url());
++    auto completion = script->run(HTML::ClassicScript::RethrowErrors::No);
++    if (completion.is_error() || !completion.value().is_function()) {
++        dbgln("Content scripts of extension {} could not be set up", extension_id);
++        return bridge;
++    }
++
++    HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
++    auto bridge_value = Bindings::wrap(Bindings::host_defined_wrapper_world(realm), realm, bridge);
++    auto result = JS::call(vm, completion.value().as_function(), JS::js_undefined(), bridge_value);
++    if (result.is_error())
++        dbgln("Content scripts of extension {} threw while starting", extension_id);
++    return bridge;
++}
++
++static bool stage_reached(DOM::Document const& document, StringView run_at)
++{
++    if (run_at == "document_start"sv)
++        return true;
++    if (run_at == "document_end"sv)
++        return document.readiness() != HTML::DocumentReadyState::Loading;
++    return document.readiness() == HTML::DocumentReadyState::Complete;
++}
++
++void ExtensionBridge::run_injection(DOM::Document& document, String const& extension_id, String const& setup_program, Injection injection)
++{
++    if (is_extension_origin(document.origin()) || extension_id.is_empty())
++        return;
++    auto bridge = document.extension_bridge(extension_id);
++    if (!bridge) {
++        bridge = start_program(document, extension_id, setup_program);
++        if (!bridge)
++            return;
++    }
++    if (!stage_reached(document, injection.run_at)) {
++        bridge->m_deferred_injections.append(move(injection));
++        return;
++    }
++    bridge->execute(injection);
++}
++
++void ExtensionBridge::run_due_injections()
++{
++    auto& document = window().associated_document();
++    Vector<Injection> due;
++    m_deferred_injections.remove_all_matching([&](Injection const& injection) {
++        if (!stage_reached(document, injection.run_at))
++            return false;
++        due.append(injection);
++        return true;
++    });
++    for (auto const& injection : due)
++        execute(injection);
++}
++
++void ExtensionBridge::execute(Injection const& injection)
++{
++    auto& document = window().associated_document();
++    auto& settings = document.relevant_settings_object();
++    auto& realm = settings.realm();
++    auto& vm = realm.vm();
++    HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
++
++    // The content-script program put its hooks on the bridge's wrapper, which only this closure and the browser can reach.
++    auto wrapper = Bindings::wrap(Bindings::host_defined_wrapper_world(realm), realm, GC::Ref<ExtensionBridge> { *this });
++    JS::Object& hooks = *wrapper;
++    auto hook = [&](Utf16FlyString const& name) -> JS::Value {
++        auto value = hooks.get(name);
++        return value.is_error() ? JS::js_undefined() : value.release_value();
++    };
++    auto report = hook("__cgxReport"_utf16_fly_string);
++    if (!report.is_function()) {
++        dbgln("Extension {} has no content-script context in {}; cannot inject", m_extension_id, document.url());
++        return;
++    }
++    auto token = JS::Value(static_cast<double>(injection.token));
++
++    if (injection.kind == "js"sv) {
++        Utf16FlyString binding = Utf16FlyString::from_utf8(injection.binding);
++        realm.global_object().define_direct_property(binding, hook("__cgxApi"_utf16_fly_string), JS::Attribute::Configurable | JS::Attribute::Writable);
++        auto filename = ByteString::formatted("extension://{}/injected", m_extension_id);
++        auto script = HTML::ClassicScript::create(filename, Utf16String::from_utf8(injection.code), settings, document.url());
++        auto completion = script->run(HTML::ClassicScript::RethrowErrors::Yes);
++        // The code deletes the binding first thing; a script that did not parse never ran, so delete it here too.
++        (void)realm.global_object().internal_delete(binding);
++        JS::Value arguments[3] = { token, JS::js_undefined(), JS::js_undefined() };
++        if (completion.is_error())
++            arguments[2] = completion.value().is_undefined() ? JS::Value(JS::PrimitiveString::create(vm, Utf16String::from_utf8("Script failed"sv))) : completion.value();
++        else
++            arguments[1] = completion.value();
++        (void)JS::call(vm, report.as_function(), JS::js_undefined(), arguments[0], arguments[1], arguments[2]);
++        return;
++    }
++
++    auto css = hook("__cgxCss"_utf16_fly_string);
++    if (!css.is_function())
++        return;
++    (void)JS::call(vm, css.as_function(), JS::js_undefined(), token, JS::PrimitiveString::create(vm, Utf16String::from_utf8(injection.code)), JS::Value(injection.kind == "removeCss"sv));
 +}
 +
 +void ExtensionBridge::run_content_script_stage(DOM::Document& document, StringView stage)
 +{
 +    auto message = MUST(String::formatted("{{\"kind\":\"run\",\"stage\":\"{}\"}}", stage));
-+    for (auto const& bridge : document.content_script_bridges())
++    for (auto const& bridge : document.content_script_bridges()) {
 +        bridge->deliver(message);
++        bridge->run_due_injections();
++    }
 +}
 +
 +HTML::CrossProcessId ExtensionBridge::document_id() const
@@ -378,10 +524,10 @@ index 00000000..d0017042
 +}
 diff --git a/Libraries/LibWeb/Internals/ExtensionBridge.h b/Libraries/LibWeb/Internals/ExtensionBridge.h
 new file mode 100644
-index 00000000..d567e4a0
+index 00000000..a39ba5cd
 --- /dev/null
 +++ b/Libraries/LibWeb/Internals/ExtensionBridge.h
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,86 @@
 +/*
 + * Copyright (c) 2026, cgx-webext contributors
 + *
@@ -426,6 +572,19 @@ index 00000000..d567e4a0
 +    // Tells the content scripts of the document that a later stage ("document_end", "document_idle") was reached.
 +    static void run_content_script_stage(DOM::Document&, StringView stage);
 +
++    // Code an extension injects with scripting.executeScript, tabs.executeScript or insertCSS.
++    struct Injection {
++        String kind;    // "js", "css" or "removeCss"
++        String code;    // The script (a classic script, run for its completion value) or the stylesheet.
++        String binding; // For "js": the global property the code reads the extension's API from, and deletes at once.
++        String run_at;  // "document_start", "document_end" or "document_idle".
++        u64 token { 0 };
++    };
++    // Runs an injection in the document, in the extension's content-script context. If the extension has none there yet,
++    // `setup_program` (a content-script program without scripts) creates it first. The result goes back to the browser
++    // process through the bridge, as "__inject.result".
++    static void run_injection(DOM::Document&, String const& extension_id, String const& setup_program, Injection);
++
 +    Utf16String context_init();
 +    GC::Ref<WebIDL::Promise> call(Utf16String const& name, Utf16String const& args_json);
 +    Utf16String call_sync(Utf16String const& name, Utf16String const& args_json);
@@ -442,6 +601,11 @@ index 00000000..d567e4a0
 +    virtual void visit_edges(GC::Cell::Visitor&) override;
 +
 +    HTML::CrossProcessId document_id() const;
++    // Evaluates a content-script program and calls it with a new bridge for the extension.
++    static GC::Ptr<ExtensionBridge> start_program(DOM::Document&, String const& extension_id, String const& program);
++    void execute(Injection const&);
++    void run_due_injections();
++    Vector<Injection> m_deferred_injections;
 +
 +    String m_extension_id;
 +    GC::Ptr<WebIDL::CallbackType> m_message_handler;
@@ -499,6 +663,27 @@ index 02d2000e..2aaae8b3 100644
      virtual void page_did_update_indexed_database([[maybe_unused]] String const& url, [[maybe_unused]] IndexedDB::TransactionChanges const&) { }
      virtual void page_did_update_resource_count(i32) { }
      struct NewWebViewResult {
+diff --git a/Libraries/LibWeb/TrustedTypes/TrustedTypePolicy.cpp b/Libraries/LibWeb/TrustedTypes/TrustedTypePolicy.cpp
+index 2253120a..758c2c60 100644
+--- a/Libraries/LibWeb/TrustedTypes/TrustedTypePolicy.cpp
++++ b/Libraries/LibWeb/TrustedTypes/TrustedTypePolicy.cpp
+@@ -617,6 +617,16 @@ WebIDL::ExceptionOr<Utf16String> get_trusted_type_compliant_string(TrustedTypeNa
+         break;
+     }
+ 
++    // AD-HOC (cgx-webext): Content scripts load their extension's web-accessible scripts into pages (<script src=
++    //                      "chrome-extension://...">). In Chrome and Firefox they run in an isolated world that the page's
++    //                      Trusted Types policy does not govern; ours share the page's world, so script URLs into an
++    //                      extension are let through. The page cannot change what an extension's file contains, and the
++    //                      browser serves it only if the extension made it web accessible.
++    if (expected_type == TrustedTypeName::TrustedScriptURL) {
++        if (auto const* url = input.get_pointer<Utf16String>(); url && (url->starts_with("chrome-extension://"sv) || url->starts_with("moz-extension://"sv)))
++            return *url;
++    }
++
+     // 2. Let requireTrustedTypes be the result of executing Does sink type require trusted types? algorithm, passing global, sinkGroup, and true.
+     auto const require_trusted_types = does_sink_require_trusted_types(global, sink_group, IncludeReportOnlyPolicies::Yes);
+ 
 diff --git a/Libraries/LibWeb/idl_files.cmake b/Libraries/LibWeb/idl_files.cmake
 index 664aed60..63dbfa77 100644
 --- a/Libraries/LibWeb/idl_files.cmake
@@ -592,8 +777,25 @@ index af7059cb..629b41f8 100644
  };
  
  class WEBCOMMON_API SiteCompatibilityRule {
+diff --git a/Libraries/LibWebCommon/SecureContexts/AbstractOperations.cpp b/Libraries/LibWebCommon/SecureContexts/AbstractOperations.cpp
+index 706748e1..424fbbf8 100644
+--- a/Libraries/LibWebCommon/SecureContexts/AbstractOperations.cpp
++++ b/Libraries/LibWebCommon/SecureContexts/AbstractOperations.cpp
+@@ -46,6 +46,12 @@ Trustworthiness is_origin_potentially_trustworthy(URL::Origin const& origin)
+     // 7. If origin’s scheme component is one which the user agent considers to be authenticated, return "Potentially Trustworthy".
+     // Note: See § 7.1 Packaged Applications for detail here.
+ 
++    // AD-HOC (cgx-webext): Browser extensions are packaged applications served by the browser itself, as in Chrome and
++    //                      Firefox: their pages are secure contexts, and secure pages may load their web-accessible files
++    //                      without mixed-content blocking.
++    if (origin.scheme().has_value() && origin.scheme()->is_one_of("chrome-extension"sv, "moz-extension"sv))
++        return Trustworthiness::PotentiallyTrustworthy;
++
+     // 8. If origin has been configured as a trustworthy origin, return "Potentially Trustworthy".
+     // Note: See § 7.2 Development Environments for detail here.
+ 
 diff --git a/Libraries/LibWebView/Application.cpp b/Libraries/LibWebView/Application.cpp
-index bdfb7acb..5c12bb15 100644
+index bdfb7acb..6b78b161 100644
 --- a/Libraries/LibWebView/Application.cpp
 +++ b/Libraries/LibWebView/Application.cpp
 @@ -47,6 +47,11 @@
@@ -608,7 +810,7 @@ index bdfb7acb..5c12bb15 100644
  #include <LibWebView/AutocompleteService.h>
  #include <LibWebView/BlobURLStore.h>
  #include <LibWebView/CompositorClient.h>
-@@ -242,6 +247,130 @@ Application::Application(Optional<ByteString> ladybird_binary_path)
+@@ -242,6 +247,179 @@ Application::Application(Optional<ByteString> ladybird_binary_path)
      platform_init(move(ladybird_binary_path));
  }
  
@@ -624,10 +826,12 @@ index bdfb7acb..5c12bb15 100644
 +    m_store_installer->on_installed = [this](ByteString const& id, bool is_update) {
 +        stop_extension_background_page(id);
 +        start_extension_background_page(id, is_update ? ExtensionStartReason::Update : ExtensionStartReason::Install);
++        extension_ui_changed(id, "installed"sv);
 +    };
 +    m_store_installer->on_uninstalled = [this](ByteString const& id) {
 +        stop_extension_background_page(id);
 +        m_extension_delegate->remove_extension_data(id);
++        extension_ui_changed(id, "removed"sv);
 +    };
 +    m_kept_extension_ids = m_store_installer->load_installed_packages();
 +
@@ -722,6 +926,53 @@ index bdfb7acb..5c12bb15 100644
 +    m_extension_background_views.remove(id);
 +}
 +
++void Application::extension_host_call(ByteString const&, StringView function, JsonObject const&, Function<void(ErrorOr<ByteString>)> reply)
++{
++    auto message = ByteString::formatted("{} needs a browser window, and this Ladybird has none", function.substring_view(min<size_t>(5, function.length())));
++    reply(Error::from_string_view(message.view()));
++}
++
++void Application::reload_extension(ByteString const& extension_id)
++{
++    stop_extension_background_page(extension_id);
++    start_extension_background_page(extension_id, ExtensionStartReason::Startup);
++    ViewImplementation::for_each_view([&](ViewImplementation& view) {
++        if (m_extension_manager && m_extension_manager->extension_for_url(view.url().serialize().bytes_as_string_view()) == extension_id && !is_extension_popup_view(view.view_id()))
++            view.reload();
++        return IterationDecision::Continue;
++    });
++}
++
++void Application::remove_extension(ByteString const& extension_id)
++{
++    if (!m_extension_manager)
++        return;
++    auto info = m_extension_manager->extension_info(extension_id);
++    String name = "this extension"_string;
++    if (info.has_value()) {
++        if (auto parsed = JsonValue::from_string(*info); !parsed.is_error() && parsed.value().is_object())
++            name = parsed.value().as_object().get_string("name"sv).value_or(name);
++    }
++    ExtensionPrompt prompt {
++        .title = MUST(String::formatted("Remove \"{}\"?", name)),
++        .message = "The extension and the data it stored will be removed."_string,
++        .details = {},
++        .accept_label = "Remove"_string,
++    };
++    display_extension_prompt(prompt, [this, extension_id](bool accepted) {
++        if (!accepted || !m_extension_manager)
++            return;
++        // A store install is removed through the store installer, which also tells the store pages; an extension loaded
++        // from a file is only removed for this session, as it loads again from the command line.
++        if (m_store_installer && m_store_installer->uninstall(extension_id))
++            return;
++        stop_extension_background_page(extension_id);
++        m_extension_manager->uninstall(extension_id);
++        m_loaded_extension_ids.remove_all_matching([&](auto const& id) { return id == extension_id; });
++        extension_ui_changed(extension_id, "removed"sv);
++    });
++}
++
 +void Application::display_extension_prompt(ExtensionPrompt const& prompt, Function<void(bool)> on_answer) const
 +{
 +    if (m_browser_options.auto_accept_extension_prompts) {
@@ -739,7 +990,7 @@ index bdfb7acb..5c12bb15 100644
  Application::~Application()
  {
  #if !defined(AK_OS_WINDOWS)
-@@ -286,6 +415,13 @@ Application::~Application()
+@@ -286,6 +464,13 @@ Application::~Application()
  
      PictureInPictureManager::the().destroy_all_windows();
  
@@ -753,7 +1004,7 @@ index bdfb7acb..5c12bb15 100644
      // Connection die() handlers use the process manager, so destroy the processes while it is still reachable.
      if (m_process_manager)
          m_process_manager->remove_all_processes();
-@@ -397,9 +533,16 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
+@@ -397,9 +582,16 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
      bool disable_scrollbar_painting = false;
      bool file_scheme_urls_have_tuple_origins = false;
  
@@ -770,7 +1021,7 @@ index bdfb7acb..5c12bb15 100644
  
      args_parser.add_option(Core::ArgsParser::Option {
          .argument_mode = Core::ArgsParser::OptionArgumentMode::Optional,
-@@ -585,6 +728,8 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
+@@ -585,6 +777,8 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
          site_isolation_mode = SiteIsolationMode::Disabled;
  
      m_browser_options = {
@@ -779,7 +1030,7 @@ index bdfb7acb..5c12bb15 100644
          .urls = {},
          .raw_urls = move(raw_urls),
          .headless_mode = headless_mode,
-@@ -678,6 +823,9 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
+@@ -678,6 +872,9 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
  
      m_settings = make<Settings>(Settings::create(LexicalPath::join(profile().paths().config, "Settings.json"sv).string(), move(platform_languages)));
      m_bookmark_store = make<BookmarkStore>(BookmarkStore::create(LexicalPath::join(profile().paths().config, "Bookmarks.json"sv).string()));
@@ -789,7 +1040,7 @@ index bdfb7acb..5c12bb15 100644
  
      if (m_web_content_options.is_test_mode == IsTestMode::Yes) {
          TRY(m_settings->complete_first_run());
-@@ -729,6 +877,11 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
+@@ -729,6 +926,11 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
          m_stats_log->start_sampling();
      TRY(launch_services());
  
@@ -802,7 +1053,7 @@ index bdfb7acb..5c12bb15 100644
          m_content_blocker_list_update_timer = Core::Timer::create_repeating(AK::Duration::from_seconds(24 * 60 * 60), [this] {
              start_content_blocker_list_update(ContentBlockerListUpdateTrigger::Automatic);
 diff --git a/Libraries/LibWebView/Application.h b/Libraries/LibWebView/Application.h
-index 9afbd273..2142b2bf 100644
+index 9afbd273..a8f812e6 100644
 --- a/Libraries/LibWebView/Application.h
 +++ b/Libraries/LibWebView/Application.h
 @@ -79,6 +79,10 @@ namespace WebView {
@@ -816,7 +1067,7 @@ index 9afbd273..2142b2bf 100644
  
  class WEBVIEW_API Application : public DevTools::DevToolsDelegate {
      AK_MAKE_NONCOPYABLE(Application);
-@@ -178,6 +182,22 @@ public:
+@@ -178,6 +182,36 @@ public:
      Web::NavigatorCompatibilityMode navigator_compatibility_mode() const;
  
      static BookmarkStore& bookmark_store() { return *the().m_bookmark_store; }
@@ -835,11 +1086,25 @@ index 9afbd273..2142b2bf 100644
 +    };
 +    // Calls `on_answer` exactly once. Without a UI (headless) the answer is no, unless --auto-accept-extension-prompts.
 +    virtual void display_extension_prompt(ExtensionPrompt const&, Function<void(bool)> on_answer) const;
++
++    // The browser UI's part of extensions. The defaults suit a browser without windows (headless).
++    // A host.* primitive of the extension core that needs windows and tabs (host.tabs.create, host.windows.update, ...).
++    virtual void extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply);
++    // An extension's toolbar button, menu items or shortcuts changed ("action", "commands").
++    virtual void extension_ui_changed(StringView extension_id, StringView what) { (void)extension_id, (void)what; }
++    // Whether the view shows an extension's popup (which is not a tab).
++    virtual bool is_extension_popup_view(u64 view_id) const { (void)view_id; return false; }
++    // "__ui.popupSize" [width, height] and "__ui.closePopup" from a popup page.
++    virtual void extension_popup_request(u64 view_id, StringView name, StringView args_json) { (void)view_id, (void)name, (void)args_json; }
++    // runtime.reload: restarts the background context and reloads the extension's open pages.
++    void reload_extension(ByteString const& extension_id);
++    // Removes an extension (asking the user first) and everything it stored.
++    void remove_extension(ByteString const& extension_id);
 +#endif
      void update_bookmark_action_for_current_web_view();
      void update_actions_for_active_web_view();
      void bookmarks_changed(Badge<ApplicationBookmarkStoreObserver>);
-@@ -450,6 +470,17 @@ protected:
+@@ -450,6 +484,17 @@ protected:
      explicit Application(Optional<ByteString> ladybird_binary_path = {});
  
      ErrorOr<void> initialize(Main::Arguments const&);
@@ -857,7 +1122,7 @@ index 9afbd273..2142b2bf 100644
  
      virtual void process_did_exit(Process&&, Optional<int> exit_status);
  
-@@ -631,6 +662,16 @@ private:
+@@ -631,6 +676,16 @@ private:
      RefPtr<Core::Timer> m_permission_expiry_timer;
  
      OwnPtr<BookmarkStore> m_bookmark_store;
@@ -900,10 +1165,10 @@ index 65784c2c..903bb012 100644
  
 diff --git a/Libraries/LibWebView/Extensions/ApplicationExtensionDelegate.cpp b/Libraries/LibWebView/Extensions/ApplicationExtensionDelegate.cpp
 new file mode 100644
-index 00000000..d2c865ab
+index 00000000..c39056ac
 --- /dev/null
 +++ b/Libraries/LibWebView/Extensions/ApplicationExtensionDelegate.cpp
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,170 @@
 +/*
 + * Copyright (c) 2026, cgx-webext contributors
 + *
@@ -919,6 +1184,8 @@ index 00000000..d2c865ab
 +#    include <AK/LexicalPath.h>
 +#    include <AK/StringBuilder.h>
 +#    include <LibFileSystem/FileSystem.h>
++#    include <LibCore/EventLoop.h>
++#    include <LibWebView/Application.h>
 +#    include <LibWebView/Extensions/ApplicationExtensionDelegate.h>
 +#    include <LibWebView/Utilities.h>
 +#    include <LibWebView/WebContentPage.h>
@@ -985,6 +1252,19 @@ index 00000000..d2c865ab
 +
 +void ApplicationExtensionDelegate::dispatch_event(StringView extension_id, StringView event, StringView args_json)
 +{
++    // Not for the extension: the core asks the browser UI to redraw its toolbar button, menus or shortcuts.
++    if (event.starts_with("__ui."sv)) {
++        auto args = JsonValue::from_string(args_json);
++        StringView what;
++        String what_storage;
++        if (!args.is_error() && args.value().is_array() && args.value().as_array().size() > 0 && args.value().as_array().at(0).is_string()) {
++            what_storage = args.value().as_array().at(0).as_string();
++            what = what_storage.bytes_as_string_view();
++        }
++        Application::the().extension_ui_changed(extension_id, what);
++        return;
++    }
++
 +    JsonObject message;
 +    message.set("kind"sv, "event"sv);
 +    message.set("name"sv, MUST(String::from_utf8(event)));
@@ -1002,9 +1282,42 @@ index 00000000..d2c865ab
 +
 +void ApplicationExtensionDelegate::call_browser(StringView call_json, Function<void(ErrorOr<ByteString>)> reply)
 +{
-+    // TODO: tabs.*, windows.*, action.*, cookies.*, scripting.*, contextMenus.*.
-+    dbgln_if(false, "extension: unimplemented browser call {}", call_json);
-+    reply(Error::from_string_literal("This browser extension API is not implemented yet"));
++    auto parsed = JsonValue::from_string(call_json);
++    if (parsed.is_error() || !parsed.value().is_object()) {
++        reply(Error::from_string_literal("Malformed browser call"));
++        return;
++    }
++    auto const& call = parsed.value().as_object();
++    auto function = call.get_string("function"sv).value_or({}).to_byte_string();
++    auto extension_id = call.get_string("extensionId"sv).value_or({}).to_byte_string();
++    JsonObject args;
++    if (auto list = call.get_array("args"sv); list.has_value() && list->size() > 0 && list->at(0).is_object())
++        args = list->at(0).as_object();
++
++    // Primitives the core asks of the browser (see crates/webext/src/browser_api.rs). Frames and injection work on pages,
++    // which any UI has; the rest needs windows and tabs, which the UI provides.
++    if (function == "host.tabs.frames"sv) {
++        reply(extension_tab_frames(static_cast<u64>(args.get_integer<i64>("tabId"sv).value_or(-1))));
++        return;
++    }
++    if (function == "host.scripting.inject"sv) {
++        run_extension_injection_in_tab(extension_id, args, move(reply));
++        return;
++    }
++    if (function == "host.runtime.reload"sv) {
++        // Reloading stops the context that asked; answer first.
++        reply(ByteString { "null"sv });
++        Core::deferred_invoke([extension_id] { Application::the().reload_extension(extension_id); });
++        return;
++    }
++    if (function.starts_with("host."sv)) {
++        Application::the().extension_host_call(extension_id, function, args, move(reply));
++        return;
++    }
++
++    // Requirement: the error names the API that is missing.
++    auto message = ByteString::formatted("{} is not implemented yet in Ladybird", function);
++    reply(Error::from_string_view(message.view()));
 +}
 +
 +void ApplicationExtensionDelegate::request_permissions(StringView, StringView, Function<void(bool)> reply)
@@ -1826,6 +2139,21 @@ index 00000000..ca2824d1
 +}
 +
 +#endif
+diff --git a/Libraries/LibWebView/Menu.h b/Libraries/LibWebView/Menu.h
+index daaa7b2b..d0a08774 100644
+--- a/Libraries/LibWebView/Menu.h
++++ b/Libraries/LibWebView/Menu.h
+@@ -141,6 +141,10 @@ enum class ActionID {
+     NavigatorCompatibilityMode,
+     EnableScripting,
+     BlockPopUps,
++#if defined(ENABLE_WEBEXT)
++    // An item an extension added with contextMenus.create.
++    ExtensionMenuItem,
++#endif
+ };
+ 
+ using ActionText = Variant<StringView, String>;
 diff --git a/Libraries/LibWebView/Options.h b/Libraries/LibWebView/Options.h
 index b460461f..ae2b0cf4 100644
 --- a/Libraries/LibWebView/Options.h
@@ -1841,6 +2169,158 @@ index b460461f..ae2b0cf4 100644
      Vector<String> additional_font_directories {};
      Vector<URL::URL> urls;
      Vector<ByteString> raw_urls;
+diff --git a/Libraries/LibWebView/ViewImplementation.cpp b/Libraries/LibWebView/ViewImplementation.cpp
+index b9cd4023..95e2e641 100644
+--- a/Libraries/LibWebView/ViewImplementation.cpp
++++ b/Libraries/LibWebView/ViewImplementation.cpp
+@@ -45,6 +45,11 @@
+ #include <LibWebView/URL.h>
+ #include <LibWebView/UserAgent.h>
+ #include <LibWebView/ViewImplementation.h>
++#if defined(ENABLE_WEBEXT)
++#    include <AK/JsonArray.h>
++#    include <AK/JsonObject.h>
++#    include <LibWebView/Extensions/ExtensionManager.h>
++#endif
+ #include <LibWebView/WebContentClient.h>
+ #include <LibWebView/WebDriverBiDi.h>
+ #include <math.h>
+@@ -5118,6 +5123,85 @@ void ViewImplementation::open_context_menu(NonnullRefPtr<Menu> menu, Gfx::IntPoi
+     show_context_menu(*m_context_menu, to_widget_position(content_position));
+ }
+ 
++#if defined(ENABLE_WEBEXT)
++// Items extensions added with contextMenus.create, for what the menu is about. An extension with one item shows it directly;
++// one with more shows them under its name, as in Chrome.
++static void add_extension_menu_entries(Menu& menu, JsonArray const& items, ByteString const& extension_id, JsonObject const& target)
++{
++    items.for_each([&](JsonValue const& value) {
++        if (!value.is_object())
++            return;
++        auto const& item = value.as_object();
++        auto type = item.get_string("type"sv).value_or("normal"_string);
++        if (type == "separator"sv) {
++            menu.add_separator();
++            return;
++        }
++        auto title = item.get_string("title"sv).value_or({});
++        if (auto children = item.get_array("children"sv); children.has_value() && !children->is_empty()) {
++            auto submenu = Menu::create(title);
++            add_extension_menu_entries(*submenu, *children, extension_id, target);
++            menu.add_submenu(move(submenu));
++            return;
++        }
++        auto clicked = target;
++        clicked.set("extensionId"sv, MUST(String::from_byte_string(extension_id)));
++        clicked.set("itemId"sv, item.get_string("id"sv).value_or({}));
++        auto on_activate = [payload = clicked.serialized()] {
++            if (auto* manager = Application::extension_manager())
++                (void)manager->host_event("contextMenuClicked"sv, payload.bytes_as_string_view());
++        };
++        auto checkable = type == "checkbox"sv || type == "radio"sv;
++        auto action = checkable ? Action::create_checkable(title, ActionID::ExtensionMenuItem, move(on_activate)) : Action::create(title, ActionID::ExtensionMenuItem, move(on_activate));
++        if (checkable)
++            action->set_checked(item.get_bool("checked"sv).value_or(false));
++        action->set_enabled(item.get_bool("enabled"sv).value_or(true));
++        menu.add_action(move(action));
++    });
++}
++
++static void add_extension_menu_items(ViewImplementation& view, Menu& menu, bool is_editable, Optional<String> const& selected_text, Optional<URL::URL> const& link_url, Optional<URL::URL> const& src_url, Optional<StringView> media_type)
++{
++    auto* manager = Application::extension_manager();
++    if (!manager)
++        return;
++    JsonObject target;
++    target.set("tabId"sv, static_cast<i64>(view.view_id()));
++    target.set("frameId"sv, 0);
++    target.set("pageUrl"sv, view.url().serialize());
++    target.set("editable"sv, is_editable);
++    if (selected_text.has_value())
++        target.set("selectionText"sv, *selected_text);
++    if (link_url.has_value())
++        target.set("linkUrl"sv, link_url->serialize());
++    if (src_url.has_value())
++        target.set("srcUrl"sv, src_url->serialize());
++    if (media_type.has_value())
++        target.set("mediaType"sv, MUST(String::from_utf8(*media_type)));
++    auto request = target.serialized();
++    auto response = JsonValue::from_string(manager->host_event("contextMenuItems"sv, request.bytes_as_string_view()));
++    if (response.is_error() || !response.value().is_array() || response.value().as_array().is_empty())
++        return;
++    menu.add_separator();
++    response.value().as_array().for_each([&](JsonValue const& value) {
++        if (!value.is_object())
++            return;
++        auto const& entry = value.as_object();
++        auto extension_id = entry.get_string("extensionId"sv).value_or({}).to_byte_string();
++        auto items = entry.get_array("items"sv);
++        if (!items.has_value())
++            return;
++        if (items->size() == 1) {
++            add_extension_menu_entries(menu, *items, extension_id, target);
++            return;
++        }
++        auto submenu = Menu::create(entry.get_string("name"sv).value_or("Extension"_string));
++        add_extension_menu_entries(*submenu, *items, extension_id, target);
++        menu.add_submenu(move(submenu));
++    });
++}
++#endif
++
+ NonnullRefPtr<Menu> ViewImplementation::create_page_context_menu(bool is_editable, Optional<String> const& selected_text, Optional<DictionaryLookup> const& lookup, Gfx::IntPoint content_position)
+ {
+     auto& application = Application::the();
+@@ -5152,6 +5236,9 @@ NonnullRefPtr<Menu> ViewImplementation::create_page_context_menu(bool is_editabl
+     }
+     menu->add_separator();
+     menu->add_action(*m_inspect_element_action);
++#if defined(ENABLE_WEBEXT)
++    add_extension_menu_items(*this, *menu, is_editable, selected_text, {}, {}, {});
++#endif
+     return menu;
+ }
+ 
+@@ -5167,6 +5254,9 @@ NonnullRefPtr<Menu> ViewImplementation::create_selected_text_link_context_menu(b
+     menu->add_action(*m_copy_link_to_highlight_action);
+     menu->add_separator();
+     menu->add_action(*m_inspect_element_action);
++#if defined(ENABLE_WEBEXT)
++    add_extension_menu_items(*this, *menu, is_editable, selected_text, url, {}, {});
++#endif
+     return menu;
+ }
+ 
+@@ -5553,6 +5643,9 @@ void ViewImplementation::did_request_link_context_menu(Badge<WebContentPage>, Gf
+     menu->add_action(*m_copy_link_to_highlight_action);
+     menu->add_separator();
+     menu->add_action(*m_inspect_element_action);
++#if defined(ENABLE_WEBEXT)
++    add_extension_menu_items(*this, *menu, false, {}, navigation.url, {}, {});
++#endif
+     open_context_menu(move(menu), content_position);
+ }
+ 
+@@ -5614,6 +5707,9 @@ void ViewImplementation::did_request_image_context_menu(Badge<WebContentPage>, G
+     }));
+     menu->add_separator();
+     menu->add_action(*m_inspect_element_action);
++#if defined(ENABLE_WEBEXT)
++    add_extension_menu_items(*this, *menu, false, {}, link_navigation.has_value() ? Optional<URL::URL> { link_navigation->url } : OptionalNone {}, url, "image"sv);
++#endif
+     open_context_menu(move(menu), content_position);
+ }
+ 
+@@ -5674,6 +5770,9 @@ void ViewImplementation::did_request_media_context_menu(Badge<WebContentPage>, W
+     }
+     menu->add_separator();
+     menu->add_action(*m_inspect_element_action);
++#if defined(ENABLE_WEBEXT)
++    add_extension_menu_items(*this, *menu, false, {}, navigation.has_value() ? Optional<URL::URL> { navigation->url } : OptionalNone {}, media.media_url, media.is_video ? "video"sv : "audio"sv);
++#endif
+     open_context_menu(move(menu), content_position);
+ }
+ 
 diff --git a/Libraries/LibWebView/WebContentClient.cpp b/Libraries/LibWebView/WebContentClient.cpp
 index f6c89740..98a4b67f 100644
 --- a/Libraries/LibWebView/WebContentClient.cpp
@@ -1947,18 +2427,21 @@ index 2b8d1afa..b3924161 100644
      WebContentClient(NonnullOwnPtr<IPC::Transport>, IsPrivate, Web::PageId initial_page_id, Web::HTML::CrossProcessId root_navigable_id);
      ~WebContentClient();
 diff --git a/Libraries/LibWebView/WebContentPage.cpp b/Libraries/LibWebView/WebContentPage.cpp
-index 6767dfce..15adddbd 100644
+index 6767dfce..a7334d83 100644
 --- a/Libraries/LibWebView/WebContentPage.cpp
 +++ b/Libraries/LibWebView/WebContentPage.cpp
-@@ -6,6 +6,7 @@
+@@ -6,8 +6,10 @@
  
  #include <AK/Debug.h>
  #include <AK/JsonArray.h>
 +#include <AK/ScopeGuard.h>
  #include <AK/JsonObject.h>
  #include <LibCore/ElapsedTimer.h>
++#include <LibCore/Timer.h>
  #include <LibCore/EventLoop.h>
-@@ -17,6 +18,12 @@
+ #include <LibCore/StatsLog.h>
+ #include <LibHTTP/Cookie/ParsedCookie.h>
+@@ -17,6 +19,12 @@
  #include <LibWebCommon/SecureContexts/AbstractOperations.h>
  #include <LibWebCommon/WebDriver/Error.h>
  #include <LibWebCommon/WebView/SiteIsolation.h>
@@ -1971,7 +2454,7 @@ index 6767dfce..15adddbd 100644
  #include <LibWebView/Application.h>
  #include <LibWebView/BlobURLStore.h>
  #include <LibWebView/BrowsingSession.h>
-@@ -169,7 +176,15 @@ WebContentPage::WebContentPage(WebContentClient& client, Web::PageId id, Canonic
+@@ -169,7 +177,15 @@ WebContentPage::WebContentPage(WebContentClient& client, Web::PageId id, Canonic
  {
  }
  
@@ -1988,7 +2471,7 @@ index 6767dfce..15adddbd 100644
  
  WebContentServerProxy* WebContentPage::routed_proxy() const
  {
-@@ -2756,6 +2771,9 @@ void WebContentPage::did_forward_pinch_event_to_child_frame(Web::HTML::CrossProc
+@@ -2756,6 +2772,9 @@ void WebContentPage::did_forward_pinch_event_to_child_frame(Web::HTML::CrossProc
  
  void WebContentPage::did_destroy_child_frame(Web::HTML::CrossProcessId frame_id)
  {
@@ -1998,7 +2481,7 @@ index 6767dfce..15adddbd 100644
      auto child_frame = traversable().find(frame_id);
      if (!child_frame.has_value() || !holds_container_of(*child_frame, "did_destroy_child_frame"sv))
          return;
-@@ -2873,6 +2891,9 @@ void WebContentPage::did_fail_download(u64 download_id, String error)
+@@ -2873,6 +2892,9 @@ void WebContentPage::did_fail_download(u64 download_id, String error)
  
  void WebContentPage::did_finish_loading(Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId document_id)
  {
@@ -2008,7 +2491,7 @@ index 6767dfce..15adddbd 100644
      // NB: Only the page hosting the active document finishes loading it. A page standing in for a document the
      //     navigable lost, as the page displaying the tab after its process crashed does, finishes loading the stand-in;
      //     that must not surface in the view.
-@@ -3647,4 +3668,312 @@ Messages::WebContentClient::DidRequestCookieResponse WebContentPage::did_request
+@@ -3647,4 +3669,548 @@ Messages::WebContentClient::DidRequestCookieResponse WebContentPage::did_request
      return cookie;
  }
  
@@ -2072,8 +2555,25 @@ index 6767dfce..15adddbd 100644
 +    return s_locations;
 +}
 +
++// WEBEXT_TRACE=1 logs every extension API call, its answer, and every message delivered to an extension context.
++static bool extension_trace_enabled()
++{
++    static bool s_enabled = [] {
++        auto const* value = getenv("WEBEXT_TRACE");
++        return value && *value && *value != '0';
++    }();
++    return s_enabled;
++}
++
++static StringView trace_excerpt(StringView text)
++{
++    return text.length() > 300 ? text.substring_view(0, 300) : text;
++}
++
 +void deliver_to_extension_context(u64 context_id, StringView json)
 +{
++    if (extension_trace_enabled())
++        warnln("[webext] -> context {}: {}", context_id, trace_excerpt(json));
 +    auto location = extension_context_locations().get(context_id);
 +    if (!location.has_value())
 +        return;
@@ -2160,15 +2660,17 @@ index 6767dfce..15adddbd 100644
 +        // Content scripts of an extension in a web page: only if that extension's content scripts match the document.
 +        extension_id = bridge_key;
 +        auto scripts = manager->content_scripts_for(extension_id, serialized_url, document->is_top_frame);
-+        if (!scripts.has_value() || *scripts == "[]"sv || extension_of_page(*document, *manager).has_value()) {
++        auto injected = m_extension_injection_grants.get(document_id).map([&](auto const& ids) { return ids.contains_slow(extension_id); }).value_or(false);
++        if ((!injected && (!scripts.has_value() || *scripts == "[]"sv)) || extension_of_page(*document, *manager).has_value()) {
 +            client().did_misbehave("did_request_extension_context_init"sv, "no content scripts of that extension match the document"sv);
 +            return {};
 +        }
 +        kind = ExtensionManager::ContextKind::ContentScript;
 +    }
 +
++    auto is_popup = kind == ExtensionManager::ContextKind::ExtensionPage && Application::the().is_extension_popup_view(view().view_id());
 +    Optional<i64> tab_id;
-+    if (kind != ExtensionManager::ContextKind::Background && displays_tab())
++    if (kind != ExtensionManager::ContextKind::Background && !is_popup && displays_tab())
 +        tab_id = static_cast<i64>(view().view_id());
 +    Optional<i64> frame_id;
 +    if (kind == ExtensionManager::ContextKind::ContentScript)
@@ -2185,6 +2687,14 @@ index 6767dfce..15adddbd 100644
 +    auto init = manager->init_data_for_context(context_id);
 +    if (!init.has_value())
 +        return {};
++    if (is_popup) {
++        // The popup's boot script reports its size and closes it through the browser (see Shim/boot.js).
++        if (auto parsed = JsonValue::from_string(*init); !parsed.is_error() && parsed.value().is_object()) {
++            auto object = parsed.release_value().as_object();
++            object.set("isPopup"sv, true);
++            return object.serialized();
++        }
++    }
 +    return MUST(String::from_byte_string(*init));
 +}
 +
@@ -2217,12 +2727,215 @@ index 6767dfce..15adddbd 100644
 +    return call.serialized().to_byte_string();
 +}
 +
++// ---- Injected code (scripting.executeScript, tabs.executeScript, insertCSS) ----------------------------------------------
++
++namespace {
++
++struct ExtensionFrame {
++    RefPtr<WebContentPage> page;
++    Web::HTML::CrossProcessId document_id;
++    i64 frame_id { 0 };
++    i64 parent_frame_id { -1 };
++    URL::URL url;
++};
++
++struct PendingInjection {
++    AK_ALLOC_WITH_KMALLOC;
++    AK_MAKE_NONCOPYABLE(PendingInjection);
++    AK_MAKE_NONMOVABLE(PendingInjection);
++
++public:
++    PendingInjection() = default;
++    ByteString extension_id;
++    // The documents still to answer, and their frame ids.
++    HashMap<Web::HTML::CrossProcessId, i64> waiting;
++    JsonArray results;
++    Function<void(ErrorOr<ByteString>)> reply;
++    RefPtr<Core::Timer> timeout;
++};
++
++}
++
++static HashMap<u64, NonnullOwnPtr<PendingInjection>>& pending_injections()
++{
++    static HashMap<u64, NonnullOwnPtr<PendingInjection>> s_pending;
++    return s_pending;
++}
++
++static Optional<ViewImplementation&> view_with_id(u64 id)
++{
++    Optional<ViewImplementation&> found;
++    ViewImplementation::for_each_view([&](ViewImplementation& view) {
++        if (view.view_id() != id)
++            return IterationDecision::Continue;
++        found = view;
++        return IterationDecision::Break;
++    });
++    return found;
++}
++
++static i64 frame_id_of(CanonicalNavigable const& navigable)
++{
++    return navigable.is_top_level_traversable() ? 0 : static_cast<i64>(navigable.id().local_id);
++}
++
++// Every frame of a tab whose document a page hosts, whichever process that page is in.
++static Vector<ExtensionFrame> frames_of_view(ViewImplementation& view)
++{
++    Vector<ExtensionFrame> frames;
++    if (!view.has_traversable())
++        return frames;
++    CanonicalTraversable const& traversable = view.traversable();
++    traversable.for_each_in_inclusive_subtree([&](CanonicalNavigable const& navigable) {
++        RefPtr<WebContentPage> host;
++        traversable.for_each_hosting_page([&](WebContentPage& page) {
++            if (!host && traversable.hosts(navigable, page) && page.hosts_active_document_of(navigable))
++                host = page;
++        });
++        if (!host)
++            return IterationDecision::Continue;
++        auto const* parent = navigable.parent();
++        frames.append({ .page = host, .document_id = navigable.active_document().id(), .frame_id = frame_id_of(navigable), .parent_frame_id = parent ? frame_id_of(*parent) : -1, .url = navigable.active_document_url() });
++        return IterationDecision::Continue;
++    });
++    return frames;
++}
++
++ErrorOr<ByteString> extension_tab_frames(u64 tab_id)
++{
++    auto view = view_with_id(tab_id);
++    if (!view.has_value())
++        return Error::from_string_literal("No tab with that id");
++    JsonArray list;
++    for (auto const& frame : frames_of_view(*view)) {
++        JsonObject entry;
++        entry.set("frameId"sv, frame.frame_id);
++        entry.set("parentFrameId"sv, frame.parent_frame_id);
++        entry.set("url"sv, frame.url.serialize());
++        entry.set("documentId"sv, MUST(String::formatted("{}", frame.document_id.local_id)));
++        TRY(list.append(move(entry)));
++    }
++    return list.serialized().to_byte_string();
++}
++
++static void finish_injection(u64 token)
++{
++    auto pending = pending_injections().take(token);
++    if (!pending.has_value())
++        return;
++    // Frames that went away, or never reached the stage the code waited for.
++    for (auto const& [document_id, frame_id] : (*pending)->waiting) {
++        JsonObject entry;
++        entry.set("frameId"sv, frame_id);
++        entry.set("error"sv, "The frame was removed before the script could run."sv);
++        MUST((*pending)->results.append(move(entry)));
++    }
++    (*pending)->reply((*pending)->results.serialized().to_byte_string());
++}
++
++void run_extension_injection_in_tab(StringView extension_id, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
++{
++    static u64 s_next_token = 1;
++
++    auto tab_id = args.get_integer<i64>("tabId"sv);
++    auto view = tab_id.has_value() ? view_with_id(static_cast<u64>(*tab_id)) : Optional<ViewImplementation&> {};
++    if (!view.has_value()) {
++        reply(Error::from_string_literal("No tab with that id"));
++        return;
++    }
++    HashTable<i64> wanted;
++    if (auto ids = args.get_array("frameIds"sv); ids.has_value()) {
++        ids->for_each([&](JsonValue const& id) {
++            if (auto number = id.get_integer<i64>(); number.has_value())
++                wanted.set(*number);
++        });
++    }
++
++    auto token = s_next_token++;
++    auto pending = make<PendingInjection>();
++    pending->extension_id = extension_id;
++    pending->reply = move(reply);
++    auto setup = args.get_string("setupProgram"sv).value_or({});
++    auto kind = args.get_string("kind"sv).value_or("js"_string);
++    auto code = args.get_string("code"sv).value_or({});
++    auto binding = args.get_string("binding"sv).value_or({});
++    auto run_at = args.get_string("runAt"sv).value_or("document_idle"_string);
++
++    Vector<ExtensionFrame> targets;
++    for (auto& frame : frames_of_view(*view)) {
++        if (wanted.contains(frame.frame_id)) {
++            pending->waiting.set(frame.document_id, frame.frame_id);
++            targets.append(move(frame));
++        }
++    }
++    if (targets.is_empty()) {
++        pending->reply(ByteString { "[]"sv });
++        return;
++    }
++    // A script waiting for a document that never finishes loading is reported as not run, rather than waited for forever.
++    pending->timeout = Core::Timer::create_single_shot(AK::Duration::from_seconds(30), [token] { finish_injection(token); });
++    pending->timeout->start();
++    pending_injections().set(token, move(pending));
++
++    for (auto const& frame : targets)
++        frame.page->run_extension_injection(frame.document_id, extension_id, setup, kind, code, binding, run_at, token);
++}
++
++// "__inject.result" [token, ok, value]: the answer of one document.
++static void extension_injection_result(ByteString const& extension_id, Web::HTML::CrossProcessId document_id, String const& args_json)
++{
++    auto args = JsonValue::from_string(args_json);
++    if (args.is_error() || !args.value().is_array() || args.value().as_array().size() < 3)
++        return;
++    auto const& list = args.value().as_array();
++    auto token = list.at(0).get_integer<u64>();
++    if (!token.has_value())
++        return;
++    auto pending = pending_injections().get(*token);
++    // Only the extension that injected the code may answer for it, and only for a document it was sent to.
++    if (!pending.has_value() || (*pending)->extension_id != extension_id)
++        return;
++    auto frame_id = (*pending)->waiting.take(document_id);
++    if (!frame_id.has_value())
++        return;
++    JsonObject entry;
++    entry.set("frameId"sv, *frame_id);
++    entry.set("documentId"sv, MUST(String::formatted("{}", document_id.local_id)));
++    if (list.at(1).is_bool() && list.at(1).as_bool())
++        entry.set("result"sv, list.at(2));
++    else
++        entry.set("error"sv, list.at(2).is_string() ? list.at(2).as_string() : "Script failed"_string);
++    MUST((*pending)->results.append(move(entry)));
++    if ((*pending)->waiting.is_empty())
++        finish_injection(*token);
++}
++
++void WebContentPage::run_extension_injection(Web::HTML::CrossProcessId document_id, ByteString const& extension_id, String const& setup_program, String const& kind, String const& code, String const& binding, String const& run_at, u64 token)
++{
++    auto& grants = m_extension_injection_grants.ensure(document_id);
++    if (!grants.contains_slow(extension_id))
++        grants.append(extension_id);
++    async_run_extension_injection(document_id, MUST(String::from_byte_string(extension_id)), setup_program, kind, code, binding, run_at, token);
++}
++
 +void WebContentPage::did_call_extension_api(Web::HTML::CrossProcessId document_id, String extension_id_or_empty, u64 request_id, String name, String args_json)
 +{
 +    auto* manager = Application::extension_manager();
 +    auto record = verified_extension_context(document_id, extension_id_or_empty.to_byte_string());
 +    if (!manager || !record.has_value()) {
 +        async_extension_api_reply(document_id, extension_id_or_empty, request_id, false, "Extension context invalidated."_string);
++        return;
++    }
++
++    if (name == "__inject.result"sv) {
++        async_extension_api_reply(document_id, extension_id_or_empty, request_id, true, "null"_string);
++        extension_injection_result(record->extension_id, document_id, args_json);
++        return;
++    }
++    if (name.starts_with_bytes("__ui."sv)) {
++        async_extension_api_reply(document_id, extension_id_or_empty, request_id, true, "null"_string);
++        if (record->kind == ExtensionManager::ContextKind::ExtensionPage)
++            Application::the().extension_popup_request(view().view_id(), name.bytes_as_string_view(), args_json.bytes_as_string_view());
 +        return;
 +    }
 +
@@ -2243,7 +2956,11 @@ index 6767dfce..15adddbd 100644
 +        return;
 +    }
 +
-+    manager->dispatch(api_call_json(*record, name, args_json), [weak_client = WeakPtr<WebContentClient> { client() }, page_id = id(), document_id, bridge_key = extension_id_or_empty, request_id](bool ok, StringView result) {
++    if (extension_trace_enabled())
++        warnln("[webext] {} {} context {}: {}({})", record->extension_id.substring_view(0, min<size_t>(8, record->extension_id.length())), context_kind_name(record->kind), record->context_id, name, trace_excerpt(args_json));
++    manager->dispatch(api_call_json(*record, name, args_json), [weak_client = WeakPtr<WebContentClient> { client() }, page_id = id(), document_id, bridge_key = extension_id_or_empty, request_id, name](bool ok, StringView result) {
++        if (extension_trace_enabled())
++            warnln("[webext]   {} {}: {}", name, ok ? "=>"sv : "FAILED"sv, trace_excerpt(result));
 +        auto client = weak_client.strong_ref();
 +        if (!client)
 +            return;
@@ -2298,12 +3015,14 @@ index 6767dfce..15adddbd 100644
 +        if (!find_hosted_document(*this, document_id).has_value())
 +            gone.append(document_id);
 +    }
++    m_extension_injection_grants.remove_all_matching([&](auto document_id, auto const&) { return !find_hosted_document(*this, document_id).has_value(); });
 +    for (auto document_id : gone)
 +        extension_contexts_destroyed(document_id);
 +}
 +
 +void WebContentPage::extension_contexts_destroyed(Web::HTML::CrossProcessId document_id)
 +{
++    m_extension_injection_grants.remove(document_id);
 +    auto records = m_extension_contexts.take(document_id);
 +    if (!records.has_value())
 +        return;
@@ -2322,7 +3041,7 @@ index 6767dfce..15adddbd 100644
 +
  }
 diff --git a/Libraries/LibWebView/WebContentPage.h b/Libraries/LibWebView/WebContentPage.h
-index 03f4e63f..58257747 100644
+index 03f4e63f..17e6d3af 100644
 --- a/Libraries/LibWebView/WebContentPage.h
 +++ b/Libraries/LibWebView/WebContentPage.h
 @@ -7,6 +7,9 @@
@@ -2335,7 +3054,7 @@ index 03f4e63f..58257747 100644
  #include <AK/Noncopyable.h>
  #include <AK/Optional.h>
  #include <AK/RefCounted.h>
-@@ -32,6 +35,13 @@
+@@ -32,6 +35,17 @@
  
  namespace WebView {
  
@@ -2344,12 +3063,16 @@ index 03f4e63f..58257747 100644
 +void deliver_to_extension_context(u64 context_id, StringView json);
 +// Sends a browser event (storage.onChanged, alarms.onAlarm, ...) to every page of an extension.
 +void deliver_event_to_extension(StringView extension_id, StringView json);
++// host.tabs.frames: the frames of the tab (view) with this id, as [{frameId, parentFrameId, url, documentId}].
++ErrorOr<ByteString> extension_tab_frames(u64 tab_id);
++// host.scripting.inject: runs code an extension injects in frames of a tab; replies with [{frameId, documentId, result|error}].
++void run_extension_injection_in_tab(StringView extension_id, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply);
 +#endif
 +
  // A reply a page owes its traversable for a message the traversable sent it.
  struct OwedReply {
      enum class Kind : u8 {
-@@ -74,6 +84,13 @@ class WEBVIEW_API WebContentPage final
+@@ -74,6 +88,13 @@ class WEBVIEW_API WebContentPage final
      friend class WebContentTestClient;
  
  public:
@@ -2363,7 +3086,7 @@ index 03f4e63f..58257747 100644
      WebContentPage(WebContentClient&, Web::PageId, CanonicalTraversable&);
      virtual ~WebContentPage() override;
  
-@@ -378,6 +395,19 @@ private:
+@@ -378,6 +399,25 @@ private:
      virtual void did_request_prompt(Utf16String message, Utf16String default_) override;
      virtual void did_change_favicon(Gfx::ShareableBitmap favicon) override;
      virtual void did_request_delete_all_cookies(u64 request_id, URL::URL url) override;
@@ -2375,6 +3098,12 @@ index 03f4e63f..58257747 100644
 +    Optional<String> extension_context_init(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty);
 +    Optional<String> call_extension_api_sync(Web::HTML::CrossProcessId document_id, String const& extension_id_or_empty, String const& name, String const& args_json);
 +    String content_script_programs(Web::HTML::CrossProcessId document_id);
++public:
++    // Runs code an extension injects in one of this page's documents, which may then start the extension's content-script
++    // context there although no content script of it matches.
++    void run_extension_injection(Web::HTML::CrossProcessId document_id, ByteString const& extension_id, String const& setup_program, String const& kind, String const& code, String const& binding, String const& run_at, u64 token);
++
++private:
 +    void extension_contexts_destroyed(Web::HTML::CrossProcessId document_id);
 +    // Ends the contexts of documents this page no longer hosts (navigated away, frame removed).
 +    void sweep_extension_contexts();
@@ -2383,7 +3112,7 @@ index 03f4e63f..58257747 100644
      Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints, Web::HTML::CrossProcessId current_navigable_id, Utf16String name, bool no_opener, Optional<URL::URL> current_document_base_url);
      void did_close_browsing_context();
      virtual void did_complete_close_preflight(u64 request_id, bool approved) override;
-@@ -441,6 +471,12 @@ private:
+@@ -441,6 +481,15 @@ private:
          Web::Permissions::PermissionName name;
      };
      Vector<FilePermissionGrant> m_file_permission_grants;
@@ -2391,6 +3120,9 @@ index 03f4e63f..58257747 100644
 +#if defined(ENABLE_WEBEXT)
 +    // Extension contexts this page hosts: document -> bridge key ("" for the extension's page, extension id for content scripts).
 +    HashMap<Web::HTML::CrossProcessId, HashMap<ByteString, ExtensionContextRecord>> m_extension_contexts;
++    // Extensions that injected code into a document (scripting.executeScript, ...), which may have a content-script context
++    // there.
++    HashMap<Web::HTML::CrossProcessId, Vector<ByteString>> m_extension_injection_grants;
 +    Optional<ExtensionContextRecord> verified_extension_context(Web::HTML::CrossProcessId document_id, ByteString const& bridge_key) const;
 +#endif
  };
@@ -2411,10 +3143,10 @@ index 0a974713..45d7a11c 100644
  option(ENABLE_INSTALL_FREEDESKTOP_FILES "Enable installing .desktop and .service files" ${freedesktop_files_default})
  option(LADYBIRD_ENABLE_CPPTRACE "Enable use of cpptrace as the default library for stacktraces. If not available falls back to backtrace.h" ON)
 diff --git a/Services/WebContent/ConnectionFromClient.cpp b/Services/WebContent/ConnectionFromClient.cpp
-index dc3e1b2a..f03252c9 100644
+index dc3e1b2a..3b0e39c0 100644
 --- a/Services/WebContent/ConnectionFromClient.cpp
 +++ b/Services/WebContent/ConnectionFromClient.cpp
-@@ -3690,6 +3690,18 @@ void ConnectionFromClient::did_delete_all_cookies(Web::PageId page_id, u64 reque
+@@ -3690,6 +3690,24 @@ void ConnectionFromClient::did_delete_all_cookies(Web::PageId page_id, u64 reque
          page->did_delete_all_cookies(request_id);
  }
  
@@ -2430,24 +3162,31 @@ index dc3e1b2a..f03252c9 100644
 +        page->deliver_extension_message(document_id, extension_id, json);
 +}
 +
++void ConnectionFromClient::run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, u64 token)
++{
++    if (auto page = this->page(page_id); page.has_value())
++        page->run_extension_injection(document_id, extension_id, setup_program, { .kind = move(kind), .code = move(code), .binding = move(binding), .run_at = move(run_at), .token = token });
++}
++
  void ConnectionFromClient::toggle_media_play_state(Web::PageId page_id)
  {
      if (auto page = this->page(page_id); page.has_value())
 diff --git a/Services/WebContent/ConnectionFromClient.h b/Services/WebContent/ConnectionFromClient.h
-index 1db9b7e0..6d013715 100644
+index 1db9b7e0..09cada58 100644
 --- a/Services/WebContent/ConnectionFromClient.h
 +++ b/Services/WebContent/ConnectionFromClient.h
-@@ -281,6 +281,8 @@ private:
+@@ -281,6 +281,9 @@ private:
      virtual void handle_file_return(Web::PageId page_id, i32 error, Optional<IPC::File> file, i32 request_id) override;
      virtual void blob_url_entry_removed(Utf16String url) override;
      virtual void did_delete_all_cookies(Web::PageId page_id, u64 request_id) override;
 +    virtual void extension_api_reply(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, bool ok, String json) override;
 +    virtual void deliver_extension_message(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String json) override;
++    virtual void run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, u64 token) override;
      virtual void set_system_visibility_state(Web::PageId page_id, Web::HTML::VisibilityState) override;
      virtual void set_browsing_context_group(Web::PageId page_id, u64 browsing_context_group_id) override;
      virtual void update_visibility_state(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::VisibilityState) override;
 diff --git a/Services/WebContent/PageClient.cpp b/Services/WebContent/PageClient.cpp
-index fb33962b..288e51fc 100644
+index fb33962b..9ebc7c4e 100644
 --- a/Services/WebContent/PageClient.cpp
 +++ b/Services/WebContent/PageClient.cpp
 @@ -26,6 +26,7 @@
@@ -2458,7 +3197,7 @@ index fb33962b..288e51fc 100644
  #include <LibWeb/CSS/StyleScope.h>
  #include <LibWeb/CSS/StyleSheetIdentifier.h>
  #include <LibWeb/CSS/StyleSheetImport.h>
-@@ -2090,6 +2091,90 @@ Optional<Web::FileAPI::SerializedBlobURLEntry> PageClient::page_did_request_blob
+@@ -2090,6 +2091,100 @@ Optional<Web::FileAPI::SerializedBlobURLEntry> PageClient::page_did_request_blob
      return response->take_entry();
  }
  
@@ -2546,24 +3285,43 @@ index fb33962b..288e51fc 100644
 +        bridge->deliver(json);
 +}
 +
++void PageClient::run_extension_injection(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& setup_program, Web::Internals::ExtensionBridge::Injection injection)
++{
++    for (auto const& navigable : page().hosted_navigables()) {
++        if (auto document = navigable->active_document(); document && document->id() == document_id) {
++            Web::Internals::ExtensionBridge::run_injection(*document, extension_id, setup_program, move(injection));
++            return;
++        }
++    }
++}
++
  void PageClient::page_did_request_color_picker(Color current_color)
  {
      client().async_did_request_color_picker(m_id, current_color);
 diff --git a/Services/WebContent/PageClient.h b/Services/WebContent/PageClient.h
-index 5f91b52c..b0b01a76 100644
+index 5f91b52c..24ab504b 100644
 --- a/Services/WebContent/PageClient.h
 +++ b/Services/WebContent/PageClient.h
-@@ -47,6 +47,9 @@ class PageClient final : public Web::PageClient {
+@@ -22,6 +22,7 @@
+ #include <LibWeb/HTML/Scripting/ConsoleInputCompletion.h>
+ #include <LibWeb/HTML/Scripting/ScriptRegistry.h>
+ #include <LibWeb/HTML/SessionHistoryEntry.h>
++#include <LibWeb/Internals/ExtensionBridge.h>
+ #include <LibWeb/Page/Page.h>
+ #include <LibWebCommon/Forward.h>
+ #include <LibWebCommon/HTML/CrossProcessId.h>
+@@ -47,6 +48,10 @@ class PageClient final : public Web::PageClient {
      GC_DECLARE_ALLOCATOR(PageClient);
  
  public:
 +    // AD-HOC (cgx-webext): from the browser process, for the extension bridges of this page's documents.
 +    void extension_api_reply(Web::HTML::CrossProcessId document_id, String const& extension_id, u64 request_id, bool ok, String const& json);
 +    void deliver_extension_message(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& json);
++    void run_extension_injection(Web::HTML::CrossProcessId document_id, String const& extension_id, String const& setup_program, Web::Internals::ExtensionBridge::Injection);
      static GC::Ref<PageClient> create(PageHost& page_host, Web::PageId id, Optional<Web::HTML::CrossProcessId> pending_root_navigable_id = {});
  
      virtual ~PageClient() override;
-@@ -357,6 +360,11 @@ private:
+@@ -357,6 +362,11 @@ private:
      virtual void page_did_remove_blob_url_entries(Web::HTML::EnvironmentSettingsObject const&, Vector<Utf16String> const& urls) override;
      virtual void page_did_retain_blob_url_token(Web::HTML::CrossProcessId navigable_id, URL::BlobURLEntry::Token) override;
      virtual Optional<Web::FileAPI::SerializedBlobURLEntry> page_did_request_blob_url_entry(Utf16String const& url, Optional<URL::BlobURLEntry::Token> token) override;
@@ -2597,29 +3355,61 @@ index 3272f8a0..c5614350 100644
      did_destroy_compositor_context(Web::CompositorContextId context_id) =|
  
 diff --git a/Services/WebContent/WebContentServer.ipc b/Services/WebContent/WebContentServer.ipc
-index 6bc49eea..4bd6b3bd 100644
+index 6bc49eea..688c6ab5 100644
 --- a/Services/WebContent/WebContentServer.ipc
 +++ b/Services/WebContent/WebContentServer.ipc
-@@ -293,6 +293,10 @@ endpoint WebContentServer routed by Web::PageId page_id
+@@ -293,6 +293,12 @@ endpoint WebContentServer routed by Web::PageId page_id
      blob_url_entry_removed(Utf16String url) =|
      did_delete_all_cookies(Web::PageId page_id, u64 request_id) =|
  
 +    // AD-HOC (cgx-webext): Replies to did_call_extension_api, and messages for an extension page's chrome.*/browser.*.
 +    extension_api_reply(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, u64 request_id, bool ok, String json) =|
 +    deliver_extension_message(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String json) =|
++    // Code an extension injects (scripting.executeScript, insertCSS, ...); the result comes back as "__inject.result".
++    run_extension_injection(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String extension_id, String setup_program, String kind, String code, String binding, String run_at, u64 token) =|
 +
      set_system_visibility_state(Web::PageId page_id, Web::HTML::VisibilityState system_visibility_state) =|
      update_visibility_state(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::VisibilityState visibility_state) =|
  
 diff --git a/UI/Qt/Application.cpp b/UI/Qt/Application.cpp
-index f405d12a..ae41c2ad 100644
+index f405d12a..569ed2ac 100644
 --- a/UI/Qt/Application.cpp
 +++ b/UI/Qt/Application.cpp
-@@ -1601,6 +1601,41 @@ void Application::display_error_dialog(StringView error_message) const
+@@ -22,6 +22,9 @@
+ #include <LibWebView/URL.h>
+ #include <LibWebView/Utilities.h>
+ #include <LibWebView/WebContentPage.h>
++#if defined(ENABLE_WEBEXT)
++#    include <UI/Qt/ExtensionsUI.h>
++#endif
+ #include <UI/Qt/Application.h>
+ #include <UI/Qt/BookmarkDialog.h>
+ #include <UI/Qt/ChromeLayout.h>
+@@ -1601,6 +1604,61 @@ void Application::display_error_dialog(StringView error_message) const
      create_message_box(QMessageBox::Warning, error_message, active_window_if_any())->open();
  }
  
 +#if defined(ENABLE_WEBEXT)
++void Application::extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
++{
++    Extensions::host_call(extension_id, function, args, move(reply));
++}
++
++void Application::extension_ui_changed(StringView extension_id, StringView what)
++{
++    Extensions::ui_changed(extension_id, what);
++}
++
++bool Application::is_extension_popup_view(u64 view_id) const
++{
++    return Extensions::is_popup_view(view_id);
++}
++
++void Application::extension_popup_request(u64 view_id, StringView name, StringView args_json)
++{
++    Extensions::popup_request(view_id, name, args_json);
++}
++
 +void Application::display_extension_prompt(ExtensionPrompt const& prompt, Function<void(bool)> on_answer) const
 +{
 +    if (browser_options().headless_mode.has_value() || browser_options().auto_accept_extension_prompts) {
@@ -2658,18 +3448,1568 @@ index f405d12a..ae41c2ad 100644
  {
      auto path = download_file_path_for_frontend_action(download);
 diff --git a/UI/Qt/Application.h b/UI/Qt/Application.h
-index 2529f66e..0aa8bca5 100644
+index 2529f66e..eca23717 100644
 --- a/UI/Qt/Application.h
 +++ b/UI/Qt/Application.h
-@@ -169,6 +169,9 @@ private:
+@@ -169,6 +169,13 @@ private:
      virtual NonnullRefPtr<Core::Promise<ByteString>> ask_user_for_download_path(ByteString const& file) const override;
      virtual void display_download_confirmation_dialog(StringView download_name, LexicalPath const& path) const override;
      virtual void display_error_dialog(StringView error_message) const override;
 +#if defined(ENABLE_WEBEXT)
 +    virtual void display_extension_prompt(ExtensionPrompt const&, Function<void(bool)> on_answer) const override;
++    virtual void extension_host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply) override;
++    virtual void extension_ui_changed(StringView extension_id, StringView what) override;
++    virtual bool is_extension_popup_view(u64 view_id) const override;
++    virtual void extension_popup_request(u64 view_id, StringView name, StringView args_json) override;
 +#endif
      virtual void open_download(WebView::FileDownloader::Download const&) const override;
      virtual void show_download_in_folder(WebView::FileDownloader::Download const&) const override;
+ 
+diff --git a/UI/Qt/CMakeLists.txt b/UI/Qt/CMakeLists.txt
+index 59140801..08c5356f 100644
+--- a/UI/Qt/CMakeLists.txt
++++ b/UI/Qt/CMakeLists.txt
+@@ -60,6 +60,11 @@ add_library(ladybird_impl STATIC
+     WindowScreenObserver.cpp
+     WindowToolbar.cpp
+ )
++
++# AD-HOC (cgx-webext): extension toolbar buttons, the extensions panel and extension popups.
++if (ENABLE_WEBEXT)
++    target_sources(ladybird_impl PRIVATE ExtensionsUI.cpp ExtensionsUI.h)
++endif()
+ if (NOT APPLE AND NOT WIN32 AND NOT ANDROID)
+     target_sources(ladybird_impl PRIVATE
+         AccessibilityInterface.cpp
+diff --git a/UI/Qt/ExtensionsUI.cpp b/UI/Qt/ExtensionsUI.cpp
+new file mode 100644
+index 00000000..434553b1
+--- /dev/null
++++ b/UI/Qt/ExtensionsUI.cpp
+@@ -0,0 +1,1368 @@
++/*
++ * Copyright (c) 2026, cgx-webext contributors
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#if defined(ENABLE_WEBEXT)
++
++#    include <AK/Base64.h>
++#    include <AK/QuickSort.h>
++#    include <AK/HashMap.h>
++#    include <AK/JsonArray.h>
++#    include <AK/JsonValue.h>
++#    include <LibCore/File.h>
++#    include <LibURL/Parser.h>
++#    include <LibWebView/Application.h>
++#    include <LibWebView/Extensions/ExtensionManager.h>
++#    include <UI/Qt/Application.h>
++#    include <UI/Qt/BrowserWindow.h>
++#    include <UI/Qt/ChromeStyle.h>
++#    include <UI/Qt/ExtensionsUI.h>
++#    include <UI/Qt/Popover.h>
++#    include <UI/Qt/StringUtils.h>
++#    include <UI/Qt/Tab.h>
++#    include <UI/Qt/WebContentView.h>
++#    include <UI/Qt/WindowToolbar.h>
++
++#    include <QApplication>
++#    include <QBuffer>
++#    include <QDateTime>
++#    include <QFrame>
++#    include <QHBoxLayout>
++#    include <QImage>
++#    include <QKeyEvent>
++#    include <QLabel>
++#    include <QMenu>
++#    include <QPainter>
++#    include <QPainterPath>
++#    include <QPushButton>
++#    include <QScrollArea>
++#    include <QShortcut>
++#    include <QTimer>
++#    include <QToolButton>
++#    include <QVBoxLayout>
++
++namespace Ladybird {
++
++static constexpr int PANEL_WIDTH = 340;
++static constexpr int PANEL_MAX_HEIGHT = 480;
++static constexpr int ACTION_ICON_SIZE = 18;
++static constexpr int ROW_ICON_SIZE = 20;
++// Chrome's limits for a popup's size.
++static constexpr int POPUP_MIN = 25;
++static constexpr int POPUP_MAX_WIDTH = 800;
++static constexpr int POPUP_MAX_HEIGHT = 600;
++
++static WebView::ExtensionManager* manager()
++{
++    return WebView::Application::extension_manager();
++}
++
++static JsonValue ask_core(StringView name, JsonObject const& args)
++{
++    auto* m = manager();
++    if (!m)
++        return JsonValue {};
++    auto request = args.serialized();
++    auto response = JsonValue::from_string(m->host_event(name, request.bytes_as_string_view()));
++    return response.is_error() ? JsonValue {} : response.release_value();
++}
++
++// ---- Windows and tabs, as the extension core sees them --------------------------------------------------------------
++
++static i64 window_id(BrowserWindow& window)
++{
++    static i64 s_next_id = 1;
++    auto value = window.property("cgxWindowId");
++    if (value.isValid())
++        return value.toLongLong();
++    auto id = s_next_id++;
++    window.setProperty("cgxWindowId", QVariant::fromValue<qlonglong>(id));
++    return id;
++}
++
++static Vector<BrowserWindow*> browser_windows()
++{
++    Vector<BrowserWindow*> windows;
++    for (auto* widget : QApplication::topLevelWidgets()) {
++        if (auto* window = qobject_cast<BrowserWindow*>(widget))
++            windows.append(window);
++    }
++    quick_sort(windows, [](auto* a, auto* b) { return window_id(*a) < window_id(*b); });
++    return windows;
++}
++
++static BrowserWindow* window_with_id(Optional<i64> id)
++{
++    if (!id.has_value())
++        return Application::the().active_window_if_any();
++    for (auto* window : browser_windows()) {
++        if (window_id(*window) == *id)
++            return window;
++    }
++    return nullptr;
++}
++
++struct TabPlace {
++    BrowserWindow* window { nullptr };
++    Tab* tab { nullptr };
++    int index { 0 };
++};
++
++static Optional<TabPlace> find_tab(i64 tab_id)
++{
++    for (auto* window : browser_windows()) {
++        for (int i = 0; i < window->tab_count(); ++i) {
++            auto* tab = window->tab_at(i);
++            if (tab && tab->is_loaded() && static_cast<i64>(tab->view().view_id()) == tab_id)
++                return TabPlace { window, tab, i };
++        }
++    }
++    return {};
++}
++
++static i64 tab_id(Tab& tab)
++{
++    return tab.is_loaded() ? static_cast<i64>(tab.view().view_id()) : -1;
++}
++
++// The window the user is in: the browser window itself, or the one an extension panel or popup belongs to.
++static BrowserWindow* focused_window()
++{
++    for (auto* widget = QApplication::activeWindow(); widget; widget = widget->parentWidget()) {
++        if (auto* window = qobject_cast<BrowserWindow*>(widget->window()))
++            return window;
++        if (!widget->parentWidget())
++            break;
++    }
++    return nullptr;
++}
++
++static ByteString browser_state_json()
++{
++    JsonArray windows;
++    auto* focused = focused_window();
++    for (auto* window : browser_windows()) {
++        JsonObject object;
++        object.set("id"sv, window_id(*window));
++        object.set("type"sv, "normal"sv);
++        auto state = window->isMinimized() ? "minimized"sv : window->isFullScreen() ? "fullscreen"sv
++            : window->isMaximized()                                                 ? "maximized"sv
++                                                                                    : "normal"sv;
++        object.set("state"sv, state);
++        object.set("focused"sv, window == focused);
++        object.set("incognito"sv, window->is_private() == WebView::IsPrivate::Yes);
++        auto geometry = window->frameGeometry();
++        object.set("left"sv, geometry.x());
++        object.set("top"sv, geometry.y());
++        object.set("width"sv, geometry.width());
++        object.set("height"sv, geometry.height());
++
++        JsonArray tabs;
++        for (int i = 0; i < window->tab_count(); ++i) {
++            auto* tab = window->tab_at(i);
++            // A restored tab that has not loaded yet has no page, so nothing an extension could act on.
++            if (!tab || !tab->is_loaded())
++                continue;
++            auto& view = tab->view();
++            JsonObject entry;
++            entry.set("id"sv, tab_id(*tab));
++            entry.set("active"sv, tab == window->current_tab());
++            entry.set("pinned"sv, tab->is_pinned());
++            entry.set("url"sv, view.url().serialize());
++            entry.set("title"sv, ak_string_from_qstring(tab->title()));
++            entry.set("status"sv, tab->is_loading() ? "loading"sv : "complete"sv);
++            entry.set("muted"sv, view.page_mute_state() == Web::HTML::MuteState::Muted);
++            entry.set("zoom"sv, view.zoom_level());
++            entry.set("width"sv, view.width());
++            entry.set("height"sv, view.height());
++            MUST(tabs.append(move(entry)));
++        }
++        object.set("tabs"sv, move(tabs));
++        MUST(windows.append(move(object)));
++    }
++    JsonObject root;
++    root.set("windows"sv, move(windows));
++    if (auto* last = Application::the().active_window_if_any())
++        root.set("lastFocusedWindowId"sv, window_id(*last));
++    return root.serialized().to_byte_string();
++}
++
++namespace Extensions {
++
++void report_browser_state()
++{
++    static ByteString s_last_reported;
++    auto* m = manager();
++    if (!m)
++        return;
++    auto state = browser_state_json();
++    if (state == s_last_reported)
++        return;
++    s_last_reported = state;
++    (void)m->host_event("browserState"sv, state);
++}
++
++void start_reporting_browser_state()
++{
++    if (!manager())
++        return;
++    // Tabs change in many places (navigation, titles, loading, dragging); comparing a small snapshot a few times a second
++    // catches all of them, and only a change reaches the extensions.
++    auto* timer = new QTimer(qApp);
++    timer->setInterval(250);
++    QObject::connect(timer, &QTimer::timeout, [] { report_browser_state(); });
++    timer->start();
++    report_browser_state();
++}
++
++}
++
++// ---- Icons ----------------------------------------------------------------------------------------------------------
++
++static QPixmap pixmap_from_core_icon(ByteString const& extension_id, JsonValue const& icon, int pixels)
++{
++    if (!icon.is_object())
++        return {};
++    auto const& object = icon.as_object();
++    auto kind = object.get_string("kind"sv).value_or({});
++    // The smallest image at least as big as wanted, else the biggest.
++    auto pick = [&](JsonArray const& list, StringView size_key) -> Optional<JsonObject> {
++        Optional<JsonObject> best;
++        i64 best_size = 0;
++        list.for_each([&](JsonValue const& entry) {
++            if (!entry.is_object())
++                return;
++            auto size = entry.as_object().get_integer<i64>(size_key).value_or(0);
++            auto better = !best.has_value()
++                || (size >= pixels && (best_size < pixels || size < best_size))
++                || (size < pixels && best_size < pixels && size > best_size);
++            if (better) {
++                best = entry.as_object();
++                best_size = size;
++            }
++        });
++        return best;
++    };
++    if (kind == "paths"sv) {
++        auto paths = object.get_array("paths"sv);
++        if (!paths.has_value())
++            return {};
++        auto chosen = pick(*paths, "size"sv);
++        if (!chosen.has_value())
++            return {};
++        auto path = chosen->get_string("path"sv).value_or({});
++        auto bytes = manager() ? manager()->read_file(extension_id, path) : Optional<ByteBuffer> {};
++        QPixmap pixmap;
++        if (bytes.has_value())
++            pixmap.loadFromData(reinterpret_cast<uchar const*>(bytes->data()), bytes->size());
++        return pixmap;
++    }
++    if (kind == "pixels"sv) {
++        auto images = object.get_array("images"sv);
++        if (!images.has_value())
++            return {};
++        auto chosen = pick(*images, "size"sv);
++        if (!chosen.has_value())
++            return {};
++        auto width = chosen->get_integer<int>("width"sv).value_or(0);
++        auto height = chosen->get_integer<int>("height"sv).value_or(0);
++        auto rgba = decode_base64(chosen->get_string("rgba"sv).value_or({}));
++        if (rgba.is_error() || width <= 0 || height <= 0 || rgba.value().size() != static_cast<size_t>(width) * height * 4)
++            return {};
++        QImage image(reinterpret_cast<uchar const*>(rgba.value().data()), width, height, width * 4, QImage::Format_RGBA8888);
++        return QPixmap::fromImage(image.copy());
++    }
++    return {};
++}
++
++// A letter on a tile, for an extension without an icon.
++static QPixmap letter_tile(QString const& name, int logical, qreal dpr, QPalette const& palette)
++{
++    QPixmap pixmap(QSize(logical, logical) * dpr);
++    pixmap.setDevicePixelRatio(dpr);
++    pixmap.fill(Qt::transparent);
++    QPainter painter(&pixmap);
++    painter.setRenderHint(QPainter::Antialiasing);
++    painter.setBrush(palette.color(QPalette::Highlight));
++    painter.setPen(Qt::NoPen);
++    painter.drawRoundedRect(QRectF(0, 0, logical, logical), 4, 4);
++    painter.setPen(palette.color(QPalette::HighlightedText));
++    auto font = painter.font();
++    font.setPixelSize(logical * 3 / 5);
++    font.setBold(true);
++    painter.setFont(font);
++    painter.drawText(QRectF(0, 0, logical, logical), Qt::AlignCenter, name.left(1).toUpper());
++    return pixmap;
++}
++
++static QColor color_from(JsonValue const& value, QColor fallback)
++{
++    if (!value.is_array() || value.as_array().size() != 4)
++        return fallback;
++    auto const& c = value.as_array();
++    auto component = [&](size_t i) { return static_cast<int>(c.at(i).get_integer<i64>().value_or(0)); };
++    QColor color(component(0), component(1), component(2), component(3));
++    return color.alpha() == 0 ? fallback : color;
++}
++
++// The extension's icon with its badge, as Chrome draws it: the text on a rounded label over the icon's lower edge.
++static QIcon action_icon(ByteString const& extension_id, JsonObject const& extension, int logical, qreal dpr, QPalette const& palette)
++{
++    auto const& action = extension.get_object("action"sv);
++    auto name = qstring_from_ak_string(extension.get_string("name"sv).value_or({}));
++    auto source = action.has_value() ? pixmap_from_core_icon(extension_id, action->get("icon"sv).value_or(JsonValue {}), static_cast<int>(logical * dpr)) : QPixmap {};
++    if (source.isNull()) {
++        // The extension's own icons, when its button has none.
++        JsonObject paths;
++        paths.set("kind"sv, "paths"sv);
++        paths.set("paths"sv, extension.get_array("icons"sv).value_or(JsonArray {}));
++        source = pixmap_from_core_icon(extension_id, paths, static_cast<int>(logical * dpr));
++    }
++    QPixmap canvas(QSize(logical, logical) * dpr);
++    canvas.setDevicePixelRatio(dpr);
++    canvas.fill(Qt::transparent);
++    QPainter painter(&canvas);
++    painter.setRenderHint(QPainter::Antialiasing);
++    painter.setRenderHint(QPainter::SmoothPixmapTransform);
++    if (source.isNull())
++        painter.drawPixmap(0, 0, letter_tile(name, logical, dpr, palette));
++    else
++        painter.drawPixmap(QRectF(0, 0, logical, logical), source, QRectF(source.rect()));
++
++    auto badge = action.has_value() ? qstring_from_ak_string(action->get_string("badgeText"sv).value_or({})) : QString {};
++    if (!badge.isEmpty()) {
++        badge = badge.left(4);
++        auto font = painter.font();
++        font.setPixelSize(qMax(8, logical / 2));
++        font.setBold(true);
++        painter.setFont(font);
++        QFontMetricsF metrics(font);
++        auto width = qMin<qreal>(logical, metrics.horizontalAdvance(badge) + 4);
++        auto height = metrics.height();
++        QRectF rect(logical - width, logical - height, width, height);
++        painter.setPen(Qt::NoPen);
++        painter.setBrush(color_from(action->get("badgeBackgroundColor"sv).value_or(JsonValue {}), QColor(95, 99, 104)));
++        painter.drawRoundedRect(rect, 2, 2);
++        painter.setPen(color_from(action->get("badgeTextColor"sv).value_or(JsonValue {}), Qt::white));
++        painter.drawText(rect, Qt::AlignCenter, badge);
++    }
++    painter.end();
++    QIcon icon(canvas);
++    return icon;
++}
++
++static QIcon puzzle_icon(QPalette const& palette)
++{
++    QIcon icon;
++    for (int dpr : { 1, 2, 3 }) {
++        QPixmap pixmap(QSize(ACTION_ICON_SIZE, ACTION_ICON_SIZE) * dpr);
++        pixmap.setDevicePixelRatio(dpr);
++        pixmap.fill(Qt::transparent);
++        QPainter painter(&pixmap);
++        painter.setRenderHint(QPainter::Antialiasing);
++        // A puzzle piece: a square with a knob on top and on the right.
++        QPainterPath path;
++        path.addRoundedRect(QRectF(2.5, 6.5, 10, 10), 1.5, 1.5);
++        path.addEllipse(QPointF(7.5, 5), 2.5, 2.5);
++        path.addEllipse(QPointF(14, 11.5), 2.5, 2.5);
++        painter.setPen(QPen(palette.color(QPalette::ButtonText), 1.4));
++        painter.setBrush(Qt::NoBrush);
++        painter.drawPath(path.simplified());
++        painter.end();
++        icon.addPixmap(pixmap);
++    }
++    return icon;
++}
++
++static QIcon pin_icon(QPalette const& palette, bool pinned)
++{
++    QPixmap pixmap(QSize(16, 16) * 2);
++    pixmap.setDevicePixelRatio(2);
++    pixmap.fill(Qt::transparent);
++    QPainter painter(&pixmap);
++    painter.setRenderHint(QPainter::Antialiasing);
++    auto color = pinned ? palette.color(QPalette::Highlight) : palette.color(QPalette::ButtonText);
++    painter.setPen(QPen(color, 1.3));
++    painter.setBrush(pinned ? QBrush(color) : Qt::NoBrush);
++    QPainterPath head;
++    head.moveTo(5, 2.5);
++    head.lineTo(11, 2.5);
++    head.lineTo(10, 7);
++    head.lineTo(12, 9.5);
++    head.lineTo(4, 9.5);
++    head.lineTo(6, 7);
++    head.closeSubpath();
++    painter.drawPath(head);
++    painter.drawLine(QPointF(8, 9.5), QPointF(8, 14));
++    painter.end();
++    return QIcon(pixmap);
++}
++
++static QIcon more_icon(QPalette const& palette)
++{
++    QPixmap pixmap(QSize(16, 16) * 2);
++    pixmap.setDevicePixelRatio(2);
++    pixmap.fill(Qt::transparent);
++    QPainter painter(&pixmap);
++    painter.setRenderHint(QPainter::Antialiasing);
++    painter.setPen(Qt::NoPen);
++    painter.setBrush(palette.color(QPalette::ButtonText));
++    for (int y : { 4, 8, 12 })
++        painter.drawEllipse(QPointF(8, y), 1.4, 1.4);
++    painter.end();
++    return QIcon(pixmap);
++}
++
++// ---- The extension's popup ------------------------------------------------------------------------------------------
++
++class ExtensionPopup final : public Popover {
++public:
++    AK_ALLOC_WITH_KMALLOC;
++
++    ExtensionPopup(QWidget* parent, BrowserWindow& window, ByteString extension_id, URL::URL const& url, QWidget& anchor)
++        : Popover(parent)
++        , m_extension_id(AK::move(extension_id))
++        , m_anchor(&anchor)
++    {
++        card().setObjectName("LadybirdDownloadsPopover");
++        auto* layout = new QVBoxLayout(&card());
++        layout->setContentsMargins(1, 1, 1, 1);
++        layout->setSpacing(0);
++        m_view = new WebContentView(&card(), {}, WebContentViewInitialState { .is_private = window.is_private(), .maximum_frames_per_second = 60.0, .display_id = {}, .owner_view = nullptr });
++        m_view->setAccessibleName("Extension popup");
++        layout->addWidget(m_view);
++        s_popups.set(m_view->view_id(), this);
++        set_content_size(POPUP_MIN * 8, POPUP_MIN * 4);
++        on_visibility_change = [this](bool visible) {
++            if (!visible) {
++                m_closed_at = QDateTime::currentMSecsSinceEpoch();
++                s_last_closed = { m_extension_id, m_closed_at };
++                deleteLater();
++            }
++        };
++        m_view->load(url);
++    }
++
++    virtual ~ExtensionPopup() override
++    {
++        if (m_view)
++            s_popups.remove(m_view->view_id());
++    }
++
++    ByteString const& extension_id() const { return m_extension_id; }
++
++    void set_content_size(int width, int height)
++    {
++        width = clamp(width, POPUP_MIN, POPUP_MAX_WIDTH);
++        height = clamp(height, POPUP_MIN, POPUP_MAX_HEIGHT);
++        if (m_view->width() == width && m_view->height() == height)
++            return;
++        m_view->setFixedSize(width, height);
++        card().adjustSize();
++        adjustSize();
++        if (m_anchor)
++            move_popover_below(*this, *m_anchor, PopoverAlignment::Trailing);
++    }
++
++    // Shown once the page has loaded and sized itself, as in Chrome, so that it does not flash empty; at the latest after
++    // a few seconds, so that a slow page still opens.
++    void open()
++    {
++        QTimer::singleShot(3000, this, [this] { reveal(); });
++    }
++
++    void reveal()
++    {
++        if (m_revealed)
++            return;
++        m_revealed = true;
++        show();
++        if (m_anchor)
++            move_popover_below(*this, *m_anchor, PopoverAlignment::Trailing);
++        raise();
++        m_view->setFocus(Qt::PopupFocusReason);
++    }
++
++    static HashMap<u64, QPointer<ExtensionPopup>> s_popups;
++    struct LastClosed {
++        ByteString extension_id;
++        qint64 at { 0 };
++    };
++    static LastClosed s_last_closed;
++
++private:
++    virtual void keyPressEvent(QKeyEvent* event) override
++    {
++        if (event->key() == Qt::Key_Escape) {
++            close();
++            return;
++        }
++        Popover::keyPressEvent(event);
++    }
++
++    ByteString m_extension_id;
++    QPointer<QWidget> m_anchor;
++    WebContentView* m_view { nullptr };
++    qint64 m_closed_at { 0 };
++    bool m_revealed { false };
++};
++
++HashMap<u64, QPointer<ExtensionPopup>> ExtensionPopup::s_popups;
++ExtensionPopup::LastClosed ExtensionPopup::s_last_closed;
++
++// One popup per window, as in Chrome.
++static QPointer<ExtensionPopup>& popup_of(BrowserWindow& window)
++{
++    static HashMap<BrowserWindow*, QPointer<ExtensionPopup>> s_by_window;
++    return s_by_window.ensure(&window);
++}
++
++static ExtensionsToolbarArea* toolbar_area_of(BrowserWindow& window)
++{
++    return window.toolbar().extensions_area();
++}
++
++static void show_popup(BrowserWindow& window, ByteString const& extension_id, URL::URL const& url, QWidget* anchor)
++{
++    auto& slot = popup_of(window);
++    if (slot) {
++        // A popup still loading was never shown, so closing it does not delete it.
++        slot->close();
++        slot->deleteLater();
++    }
++    if (!anchor) {
++        auto* area = toolbar_area_of(window);
++        anchor = area ? &area->anchor_for(extension_id) : static_cast<QWidget*>(&window);
++    }
++    auto* popup = new ExtensionPopup(anchor, window, extension_id, url, *anchor);
++    slot = popup;
++    popup->open();
++}
++
++namespace Extensions {
++
++void open_extension(BrowserWindow& window, ByteString const& extension_id, QWidget* anchor)
++{
++    // Pressing the button of an open popup closes it (the press outside the popup); that press must not open it again.
++    auto const& last = ExtensionPopup::s_last_closed;
++    if (last.extension_id == extension_id && QDateTime::currentMSecsSinceEpoch() - last.at < 300)
++        return;
++    report_browser_state();
++    JsonObject args;
++    args.set("extensionId"sv, MUST(String::from_byte_string(extension_id)));
++    if (auto* tab = window.current_tab(); tab && tab->is_loaded())
++        args.set("tabId"sv, tab_id(*tab));
++    auto result = ask_core("actionClicked"sv, args);
++    if (!result.is_object())
++        return;
++    if (auto popup = result.as_object().get_string("popup"sv); popup.has_value()) {
++        if (auto url = URL::Parser::basic_parse(*popup); url.has_value())
++            show_popup(window, extension_id, *url, anchor);
++    }
++}
++
++bool is_popup_view(u64 view_id)
++{
++    return ExtensionPopup::s_popups.contains(view_id);
++}
++
++void popup_request(u64 view_id, StringView name, StringView args_json)
++{
++    auto popup = ExtensionPopup::s_popups.get(view_id);
++    if (!popup.has_value() || !*popup)
++        return;
++    if (name == "__ui.closePopup"sv) {
++        (*popup)->close();
++        return;
++    }
++    if (name == "__ui.popupReady"sv) {
++        (*popup)->reveal();
++        return;
++    }
++    if (name == "__ui.popupSize"sv) {
++        auto args = JsonValue::from_string(args_json);
++        if (args.is_error() || !args.value().is_array() || args.value().as_array().size() < 2)
++            return;
++        auto const& size = args.value().as_array();
++        (*popup)->set_content_size(size.at(0).get_integer<int>().value_or(POPUP_MIN), size.at(1).get_integer<int>().value_or(POPUP_MIN));
++    }
++}
++
++}
++
++// ---- The extensions panel -------------------------------------------------------------------------------------------
++
++static StringView site_access_text(StringView access)
++{
++    if (access == "granted"sv)
++        return "Can read and change this site"sv;
++    if (access == "on_click"sv)
++        return "Can access this site when you click it"sv;
++    return "Cannot access this site"sv;
++}
++
++// One extension in the panel: the whole row opens it, from the mouse or the keyboard.
++class ExtensionRow final : public QFrame {
++public:
++    AK_ALLOC_WITH_KMALLOC;
++
++    explicit ExtensionRow(QWidget* parent)
++        : QFrame(parent)
++    {
++        setObjectName("LadybirdDownloadRow");
++        setFocusPolicy(Qt::StrongFocus);
++        setCursor(Qt::PointingHandCursor);
++    }
++
++    Function<void()> on_open;
++
++private:
++    virtual void mouseReleaseEvent(QMouseEvent* event) override
++    {
++        if (event->button() == Qt::LeftButton && rect().contains(event->position().toPoint()) && on_open)
++            on_open();
++        QFrame::mouseReleaseEvent(event);
++    }
++    virtual void keyPressEvent(QKeyEvent* event) override
++    {
++        if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter || event->key() == Qt::Key_Space) && on_open) {
++            on_open();
++            return;
++        }
++        QFrame::keyPressEvent(event);
++    }
++};
++
++class ExtensionsPanel final : public Popover {
++public:
++    AK_ALLOC_WITH_KMALLOC;
++
++    ExtensionsPanel(QWidget* parent, BrowserWindow& window, QWidget& anchor)
++        : Popover(parent)
++        , m_window(&window)
++        , m_anchor(&anchor)
++    {
++        card().setObjectName("LadybirdDownloadsPopover");
++        card().setFixedWidth(PANEL_WIDTH);
++        setStyleSheet(ChromeStyle::downloads_popover_style_sheet(palette()));
++        m_layout = new QVBoxLayout(&card());
++        m_layout->setContentsMargins(6, 12, 6, 6);
++        m_layout->setSpacing(0);
++        rebuild();
++    }
++
++    void rebuild()
++    {
++        // Remove the old rows.
++        while (auto* item = m_layout->takeAt(0)) {
++            if (auto* widget = item->widget())
++                widget->deleteLater();
++            if (auto* layout = item->layout()) {
++                while (auto* inner = layout->takeAt(0)) {
++                    if (inner->widget())
++                        inner->widget()->deleteLater();
++                    delete inner;
++                }
++            }
++            delete item;
++        }
++
++        auto* title = new QLabel("Extensions", &card());
++        title->setObjectName("LadybirdDownloadsPopoverTitle");
++        title->setContentsMargins(10, 0, 4, 6);
++        m_layout->addWidget(title);
++
++        JsonObject args;
++        auto* tab = m_window ? m_window->current_tab() : nullptr;
++        if (tab && tab->is_loaded())
++            args.set("tabId"sv, tab_id(*tab));
++        auto state = ask_core("uiState"sv, args);
++        auto extensions = state.is_array() ? state.as_array() : JsonArray {};
++
++        if (extensions.is_empty()) {
++            auto* empty = new QLabel("No extensions installed yet.\nAdd them from the Chrome Web Store or Firefox Add-ons.", &card());
++            empty->setObjectName("LadybirdDownloadsEmpty");
++            empty->setAlignment(Qt::AlignCenter);
++            empty->setWordWrap(true);
++            empty->setMinimumHeight(72);
++            m_layout->addWidget(empty);
++        } else {
++            auto* scroll = new QScrollArea(&card());
++            scroll->setObjectName("LadybirdDownloadsPopoverScroll");
++            scroll->setFrameShape(QFrame::NoFrame);
++            scroll->setWidgetResizable(true);
++            scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++            auto* rows = new QWidget(scroll);
++            rows->setObjectName("LadybirdDownloadsPopoverRows");
++            auto* rows_layout = new QVBoxLayout(rows);
++            rows_layout->setContentsMargins(0, 0, 0, 0);
++            rows_layout->setSpacing(0);
++            extensions.for_each([&](JsonValue const& value) {
++                if (value.is_object())
++                    rows_layout->addWidget(create_row(*rows, value.as_object()));
++            });
++            scroll->setWidget(rows);
++            scroll->setMaximumHeight(PANEL_MAX_HEIGHT - 80);
++            scroll->setMinimumHeight(qMin(PANEL_MAX_HEIGHT - 80, rows->sizeHint().height()));
++            m_layout->addWidget(scroll);
++        }
++
++        auto* separator = new QFrame(&card());
++        separator->setObjectName("LadybirdPopoverSeparator");
++        separator->setFixedHeight(1);
++        auto* separator_row = new QHBoxLayout;
++        separator_row->setContentsMargins(10, 4, 10, 4);
++        separator_row->addWidget(separator);
++        m_layout->addLayout(separator_row);
++
++        auto* find_more = new QPushButton("Find more extensions", &card());
++        find_more->setObjectName("LadybirdPopoverRow");
++        auto* stores = new QMenu(find_more);
++        auto open_store = [this](StringView url) {
++            close();
++            if (auto parsed = URL::Parser::basic_parse(url); parsed.has_value() && m_window)
++                m_window->new_tab_from_url(*parsed, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_current_tab());
++        };
++        QObject::connect(stores->addAction("Chrome Web Store"), &QAction::triggered, [open_store] { open_store("https://chromewebstore.google.com/category/extensions"sv); });
++        QObject::connect(stores->addAction("Firefox Add-ons"), &QAction::triggered, [open_store] { open_store("https://addons.mozilla.org/firefox/extensions/"sv); });
++        find_more->setMenu(stores);
++        m_layout->addWidget(find_more);
++
++        card().adjustSize();
++        adjustSize();
++        if (m_anchor)
++            move_popover_below(*this, *m_anchor, PopoverAlignment::Trailing);
++    }
++
++private:
++    QWidget* create_row(QWidget& parent, JsonObject const& extension)
++    {
++        auto id = extension.get_string("id"sv).value_or({}).to_byte_string();
++        auto name = qstring_from_ak_string(extension.get_string("name"sv).value_or({}));
++        auto const& action = extension.get_object("action"sv);
++        auto pinned = action.has_value() && action->get_bool("pinned"sv).value_or(false);
++        auto has_action = action.has_value() && action->get_string("kind"sv).value_or({}) != "none"sv;
++        auto access = site_access_text(extension.get_string("siteAccess"sv).value_or({}));
++
++        auto* row = new ExtensionRow(&parent);
++        row->setAccessibleName(name);
++        row->setAccessibleDescription(qstring_from_ak_string(access));
++        auto* layout = new QHBoxLayout(row);
++        layout->setContentsMargins(10, 6, 4, 6);
++        layout->setSpacing(10);
++
++        auto* icon = new QLabel(row);
++        icon->setPixmap(action_icon(id, extension, ROW_ICON_SIZE, devicePixelRatioF(), palette()).pixmap(ROW_ICON_SIZE, ROW_ICON_SIZE));
++        layout->addWidget(icon, 0, Qt::AlignVCenter);
++
++        auto* texts = new QVBoxLayout;
++        texts->setSpacing(1);
++        auto* name_label = new QLabel(name, row);
++        name_label->setObjectName("LadybirdDownloadFileName");
++        auto* status_label = new QLabel(qstring_from_ak_string(access), row);
++        status_label->setObjectName("LadybirdDownloadStatus");
++        texts->addWidget(name_label);
++        texts->addWidget(status_label);
++        layout->addLayout(texts, 1);
++
++        row->on_open = [this, id] {
++            auto window = m_window;
++            auto anchor = m_anchor;
++            close();
++            if (window)
++                Extensions::open_extension(*window, id, anchor ? anchor.data() : nullptr);
++        };
++
++        if (has_action) {
++            auto* pin = new QToolButton(row);
++            pin->setAutoRaise(true);
++            pin->setIcon(pin_icon(palette(), pinned));
++            pin->setToolTip(pinned ? "Unpin from toolbar" : "Pin to toolbar");
++            pin->setAccessibleName(pin->toolTip());
++            QObject::connect(pin, &QToolButton::clicked, [this, id, pinned] {
++                JsonObject args;
++                args.set("extensionId"sv, MUST(String::from_byte_string(id)));
++                args.set("pinned"sv, !pinned);
++                (void)ask_core("setActionPinned"sv, args);
++                rebuild();
++            });
++            layout->addWidget(pin, 0, Qt::AlignVCenter);
++        }
++
++        auto* more = new QToolButton(row);
++        more->setAutoRaise(true);
++        more->setIcon(more_icon(palette()));
++        more->setToolTip("More actions");
++        more->setAccessibleName(QString("More actions for %1").arg(name));
++        more->setPopupMode(QToolButton::InstantPopup);
++        auto* menu = new QMenu(more);
++        if (auto options = extension.get_string("optionsUrl"sv); options.has_value()) {
++            QObject::connect(menu->addAction("Options"), &QAction::triggered, [this, url = *options] {
++                close();
++                if (auto parsed = URL::Parser::basic_parse(url); parsed.has_value() && m_window)
++                    m_window->new_tab_from_url(*parsed, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_current_tab());
++            });
++        }
++        auto* access_action = menu->addAction(qstring_from_ak_string(access));
++        access_action->setEnabled(false);
++        menu->addSeparator();
++        QObject::connect(menu->addAction("Remove from Ladybird…"), &QAction::triggered, [this, id] {
++            close();
++            WebView::Application::the().remove_extension(id);
++        });
++        more->setMenu(menu);
++        layout->addWidget(more, 0, Qt::AlignVCenter);
++        return row;
++    }
++
++    QPointer<BrowserWindow> m_window;
++    QPointer<QWidget> m_anchor;
++    QVBoxLayout* m_layout { nullptr };
++};
++
++static QPointer<ExtensionsPanel>& open_panel()
++{
++    static QPointer<ExtensionsPanel> s_panel;
++    return s_panel;
++}
++
++// ---- The toolbar ----------------------------------------------------------------------------------------------------
++
++ExtensionsToolbarArea::ExtensionsToolbarArea(QWidget* parent)
++    : QWidget(parent)
++{
++    auto* layout = new QHBoxLayout(this);
++    layout->setContentsMargins(0, 0, 0, 0);
++    layout->setSpacing(2);
++    m_buttons_layout = new QHBoxLayout;
++    m_buttons_layout->setContentsMargins(0, 0, 0, 0);
++    m_buttons_layout->setSpacing(2);
++    layout->addLayout(m_buttons_layout);
++
++    m_puzzle_button = new QToolButton(this);
++    m_puzzle_button->setAutoRaise(true);
++    m_puzzle_button->setIcon(puzzle_icon(palette()));
++    m_puzzle_button->setIconSize({ ACTION_ICON_SIZE, ACTION_ICON_SIZE });
++    m_puzzle_button->setToolTip("Extensions");
++    m_puzzle_button->setAccessibleName("Extensions");
++    QObject::connect(m_puzzle_button, &QToolButton::clicked, this, [this] { show_panel(); });
++    layout->addWidget(m_puzzle_button);
++
++    setVisible(manager() != nullptr);
++    static bool s_reporting = false;
++    if (!s_reporting && manager()) {
++        s_reporting = true;
++        // Not from here: the window that holds this toolbar is still being built and has no tabs yet.
++        QTimer::singleShot(0, qApp, [] { Extensions::start_reporting_browser_state(); });
++    }
++    QTimer::singleShot(0, this, [this] { refresh(); });
++}
++
++ExtensionsToolbarArea::~ExtensionsToolbarArea() = default;
++
++BrowserWindow* ExtensionsToolbarArea::browser_window() const
++{
++    return qobject_cast<BrowserWindow*>(window());
++}
++
++void ExtensionsToolbarArea::set_tab(Tab* tab)
++{
++    if (m_tab == tab)
++        return;
++    m_tab = tab;
++    refresh();
++}
++
++QWidget& ExtensionsToolbarArea::anchor_for(ByteString const& extension_id)
++{
++    for (auto& button : m_action_buttons) {
++        if (button && button->property("cgxExtensionId").toString() == qstring_from_ak_string(extension_id) && button->isVisible())
++            return *button;
++    }
++    return *m_puzzle_button;
++}
++
++void ExtensionsToolbarArea::show_panel()
++{
++    auto* window = browser_window();
++    if (!window)
++        return;
++    if (open_panel()) {
++        open_panel()->close();
++        return;
++    }
++    Extensions::report_browser_state();
++    auto* panel = new ExtensionsPanel(this, *window, *m_puzzle_button);
++    panel->on_visibility_change = [panel](bool visible) {
++        if (!visible)
++            panel->deleteLater();
++    };
++    open_panel() = panel;
++    panel->show();
++    move_popover_below(*panel, *m_puzzle_button, PopoverAlignment::Trailing);
++    panel->raise();
++}
++
++void ExtensionsToolbarArea::refresh()
++{
++    if (!manager())
++        return;
++    JsonObject args;
++    if (m_tab && m_tab->is_loaded())
++        args.set("tabId"sv, tab_id(*m_tab));
++    auto state = ask_core("uiState"sv, args);
++    auto serialized = state.serialized().to_byte_string();
++    rebuild_shortcuts();
++    if (serialized == m_last_state)
++        return;
++    m_last_state = serialized;
++
++    for (auto& button : m_action_buttons) {
++        if (button)
++            button->deleteLater();
++    }
++    m_action_buttons.clear();
++
++    auto extensions = state.is_array() ? state.as_array() : JsonArray {};
++    auto count = extensions.size();
++    auto label = count == 0 ? QString("Extensions") : QString("Extensions (%1 installed)").arg(count);
++    m_puzzle_button->setToolTip(label);
++    m_puzzle_button->setAccessibleName(label);
++
++    extensions.for_each([&](JsonValue const& value) {
++        if (!value.is_object())
++            return;
++        auto const& extension = value.as_object();
++        auto const& action = extension.get_object("action"sv);
++        if (!action.has_value() || action->get_string("kind"sv).value_or({}) == "none"sv || !action->get_bool("pinned"sv).value_or(false))
++            return;
++        auto id = extension.get_string("id"sv).value_or({}).to_byte_string();
++        auto* button = new QToolButton(this);
++        button->setAutoRaise(true);
++        button->setProperty("cgxExtensionId", qstring_from_ak_string(id));
++        button->setIconSize({ ACTION_ICON_SIZE, ACTION_ICON_SIZE });
++        button->setIcon(action_icon(id, extension, ACTION_ICON_SIZE, devicePixelRatioF(), palette()));
++        auto title = qstring_from_ak_string(action->get_string("title"sv).value_or({}));
++        auto badge = qstring_from_ak_string(action->get_string("badgeText"sv).value_or({}));
++        button->setToolTip(title);
++        button->setAccessibleName(badge.isEmpty() ? title : QString("%1 (%2)").arg(title, badge));
++        auto enabled = action->get_bool("enabled"sv).value_or(true);
++        if (!enabled)
++            button->setIcon(QIcon(button->icon().pixmap(ACTION_ICON_SIZE, QIcon::Disabled)));
++        QObject::connect(button, &QToolButton::clicked, this, [this, id, button] {
++            if (auto* window = browser_window())
++                Extensions::open_extension(*window, id, button);
++        });
++        // The button's own menu: the extension's "action" items, then the browser's.
++        button->setContextMenuPolicy(Qt::CustomContextMenu);
++        auto options = extension.get_string("optionsUrl"sv);
++        QObject::connect(button, &QToolButton::customContextMenuRequested, this, [this, id, button, options](QPoint const& position) {
++            auto* menu = new QMenu(button);
++            menu->setAttribute(Qt::WA_DeleteOnClose);
++            JsonObject target;
++            target.set("contexts"sv, JsonArray { Vector<JsonValue> { JsonValue { "action"sv } } });
++            if (m_tab && m_tab->is_loaded()) {
++                target.set("tabId"sv, tab_id(*m_tab));
++                target.set("pageUrl"sv, m_tab->view().url().serialize());
++            }
++            auto items = ask_core("contextMenuItems"sv, target);
++            if (items.is_array()) {
++                items.as_array().for_each([&](JsonValue const& entry) {
++                    if (!entry.is_object() || entry.as_object().get_string("extensionId"sv).value_or({}).to_byte_string() != id)
++                        return;
++                    entry.as_object().get_array("items"sv).value_or(JsonArray {}).for_each([&](JsonValue const& item) {
++                        if (!item.is_object())
++                            return;
++                        auto const& object = item.as_object();
++                        if (object.get_string("type"sv).value_or({}) == "separator"sv) {
++                            menu->addSeparator();
++                            return;
++                        }
++                        auto* action = menu->addAction(qstring_from_ak_string(object.get_string("title"sv).value_or({})));
++                        action->setEnabled(object.get_bool("enabled"sv).value_or(true));
++                        auto clicked = target;
++                        clicked.set("extensionId"sv, MUST(String::from_byte_string(id)));
++                        clicked.set("itemId"sv, object.get_string("id"sv).value_or({}));
++                        QObject::connect(action, &QAction::triggered, [clicked] { (void)ask_core("contextMenuClicked"sv, clicked); });
++                    });
++                    menu->addSeparator();
++                });
++            }
++            if (options.has_value()) {
++                QObject::connect(menu->addAction("Options"), &QAction::triggered, this, [this, url = *options] {
++                    if (auto parsed = URL::Parser::basic_parse(url); parsed.has_value())
++                        if (auto* window = browser_window())
++                            window->new_tab_from_url(*parsed, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_current_tab());
++                });
++            }
++            QObject::connect(menu->addAction("Unpin from toolbar"), &QAction::triggered, [id] {
++                JsonObject args;
++                args.set("extensionId"sv, MUST(String::from_byte_string(id)));
++                args.set("pinned"sv, false);
++                (void)ask_core("setActionPinned"sv, args);
++            });
++            QObject::connect(menu->addAction("Remove from Ladybird…"), &QAction::triggered, [id] { WebView::Application::the().remove_extension(id); });
++            menu->popup(button->mapToGlobal(position));
++        });
++        m_buttons_layout->addWidget(button);
++        m_action_buttons.append(button);
++    });
++
++    if (open_panel() && open_panel()->parent() == this)
++        open_panel()->rebuild();
++}
++
++// Chrome's shortcut names, in Qt's spelling.
++static QKeySequence key_sequence_for(QString shortcut)
++{
++#    if defined(AK_OS_MACOS)
++    shortcut.replace("MacCtrl", "Meta");
++    shortcut.replace("Command", "Ctrl");
++#    else
++    shortcut.replace("MacCtrl", "Ctrl");
++    shortcut.replace("Command", "Ctrl");
++#    endif
++    shortcut.replace("Comma", ",");
++    shortcut.replace("Period", ".");
++    shortcut.replace("MediaNextTrack", "Media Next");
++    shortcut.replace("MediaPrevTrack", "Media Previous");
++    shortcut.replace("MediaPlayPause", "Media Play");
++    shortcut.replace("MediaStop", "Media Stop");
++    return QKeySequence(shortcut);
++}
++
++void ExtensionsToolbarArea::rebuild_shortcuts()
++{
++    auto* window = browser_window();
++    if (!window)
++        return;
++    auto commands = ask_core("commands"sv, JsonObject {});
++    auto serialized = commands.serialized().to_byte_string();
++    if (serialized == m_last_commands)
++        return;
++    m_last_commands = serialized;
++    for (auto& shortcut : m_shortcuts) {
++        if (shortcut)
++            shortcut->deleteLater();
++    }
++    m_shortcuts.clear();
++    if (!commands.is_array())
++        return;
++    commands.as_array().for_each([&](JsonValue const& value) {
++        if (!value.is_object())
++            return;
++        auto const& command = value.as_object();
++        auto keys = qstring_from_ak_string(command.get_string("shortcut"sv).value_or({}));
++        if (keys.isEmpty())
++            return;
++        auto id = command.get_string("extensionId"sv).value_or({}).to_byte_string();
++        auto name = command.get_string("name"sv).value_or({});
++        auto* shortcut = new QShortcut(key_sequence_for(keys), window);
++        shortcut->setContext(Qt::WindowShortcut);
++        QObject::connect(shortcut, &QShortcut::activated, this, [this, id, name] {
++            auto* window = browser_window();
++            if (!window)
++                return;
++            Extensions::report_browser_state();
++            JsonObject args;
++            args.set("extensionId"sv, MUST(String::from_byte_string(id)));
++            args.set("name"sv, name);
++            if (auto* tab = window->current_tab(); tab && tab->is_loaded())
++                args.set("tabId"sv, tab_id(*tab));
++            auto result = ask_core("command"sv, args);
++            if (result.is_object()) {
++                if (auto popup = result.as_object().get_string("popup"sv); popup.has_value()) {
++                    if (auto url = URL::Parser::basic_parse(*popup); url.has_value())
++                        show_popup(*window, id, *url, &anchor_for(id));
++                }
++            }
++        });
++        m_shortcuts.append(shortcut);
++    });
++}
++
++// ---- What the extension core asks of the browser ---------------------------------------------------------------------
++
++namespace Extensions {
++
++void ui_changed(StringView, StringView)
++{
++    // Coalesce: an extension often sets text, colour and icon in a row.
++    static bool s_scheduled = false;
++    if (s_scheduled)
++        return;
++    s_scheduled = true;
++    QTimer::singleShot(0, [] {
++        s_scheduled = false;
++        for (auto* window : browser_windows()) {
++            if (auto* area = toolbar_area_of(*window))
++                area->refresh();
++        }
++    });
++}
++
++static ErrorOr<ByteString> tab_reply(Tab& tab)
++{
++    report_browser_state();
++    return ByteString::formatted("{{\"tabId\":{}}}", tab_id(tab));
++}
++
++static Optional<URL::URL> url_argument(JsonObject const& args, StringView key)
++{
++    auto text = args.get_string(key);
++    if (!text.has_value())
++        return {};
++    return URL::Parser::basic_parse(*text);
++}
++
++void host_call(ByteString const&, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply)
++{
++    report_browser_state();
++    auto ok = [&] {
++        report_browser_state();
++        reply(ByteString { "null"sv });
++    };
++    auto fail = [&](StringView message) {
++        auto text = ByteString { message };
++        reply(Error::from_string_view(text.view()));
++    };
++    auto tab_arg = [&]() -> Optional<TabPlace> {
++        auto id = args.get_integer<i64>("tabId"sv);
++        return id.has_value() ? find_tab(*id) : Optional<TabPlace> {};
++    };
++    auto& application = Application::the();
++
++    if (function == "host.tabs.create"sv) {
++        auto url = url_argument(args, "url"sv).value_or(WebView::Application::settings().new_tab_page_url());
++        auto* window = window_with_id(args.get_integer<i64>("windowId"sv));
++        auto active = args.get_bool("active"sv).value_or(true);
++        if (!window) {
++            auto& created = application.new_window({ url });
++            if (auto* tab = created.current_tab())
++                return reply(tab_reply(*tab));
++            return fail("Could not open a window"sv);
++        }
++        auto index = args.get_integer<int>("index"sv);
++        auto location = index.has_value() && *index >= 0 ? BrowserWindow::TabLocation::at_index(*index) : BrowserWindow::TabLocation::end();
++        auto& tab = window->new_tab_from_url(url, active ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, location);
++        if (args.get_bool("pinned"sv).value_or(false))
++            window->pin_tab(tab);
++        return reply(tab_reply(tab));
++    }
++
++    if (function == "host.tabs.update"sv) {
++        auto place = tab_arg();
++        if (!place.has_value())
++            return fail("No tab with that id"sv);
++        if (auto url = url_argument(args, "url"sv); url.has_value())
++            place->tab->navigate(*url);
++        if (args.get_bool("active"sv).value_or(false))
++            place->window->activate_tab(place->window->tab_index(place->tab));
++        if (auto pinned = args.get_bool("pinned"sv); pinned.has_value() && *pinned != place->tab->is_pinned()) {
++            if (*pinned)
++                place->window->pin_tab(*place->tab);
++            else
++                place->window->unpin_tab(*place->tab);
++        }
++        if (auto muted = args.get_bool("muted"sv); muted.has_value()) {
++            auto& view = place->tab->view();
++            if ((view.page_mute_state() == Web::HTML::MuteState::Muted) != *muted)
++                view.toggle_page_mute_state();
++        }
++        return ok();
++    }
++
++    if (function == "host.tabs.remove"sv) {
++        auto ids = args.get_array("tabIds"sv).value_or(JsonArray {});
++        ids.for_each([&](JsonValue const& id) {
++            if (auto place = find_tab(id.get_integer<i64>().value_or(-1)); place.has_value())
++                place->window->definitely_close_tab(place->window->tab_index(place->tab));
++        });
++        return ok();
++    }
++
++    if (function == "host.tabs.reload"sv) {
++        auto place = tab_arg();
++        if (!place.has_value())
++            return fail("No tab with that id"sv);
++        place->tab->view().reload(args.get_bool("bypassCache"sv).value_or(false) ? WebView::BypassCache::Yes : WebView::BypassCache::No);
++        return ok();
++    }
++
++    if (function == "host.tabs.navigateHistory"sv) {
++        auto place = tab_arg();
++        if (!place.has_value())
++            return fail("No tab with that id"sv);
++        place->tab->view().traverse_the_history_by_delta(args.get_integer<int>("delta"sv).value_or(0));
++        return ok();
++    }
++
++    if (function == "host.tabs.duplicate"sv) {
++        auto place = tab_arg();
++        if (!place.has_value())
++            return fail("No tab with that id"sv);
++        HashTable<i64> before;
++        for (int i = 0; i < place->window->tab_count(); ++i)
++            before.set(tab_id(*place->window->tab_at(i)));
++        place->window->duplicate_tab(*place->tab);
++        for (int i = 0; i < place->window->tab_count(); ++i) {
++            auto* tab = place->window->tab_at(i);
++            if (tab->is_loaded() && !before.contains(tab_id(*tab)))
++                return reply(tab_reply(*tab));
++        }
++        return fail("Could not duplicate the tab"sv);
++    }
++
++    if (function == "host.tabs.move"sv) {
++        auto* target = window_with_id(args.get_integer<i64>("windowId"sv));
++        auto index = args.get_integer<int>("index"sv).value_or(-1);
++        auto ids = args.get_array("tabIds"sv).value_or(JsonArray {});
++        ids.for_each([&](JsonValue const& id) {
++            auto place = find_tab(id.get_integer<i64>().value_or(-1));
++            if (!place.has_value() || !target)
++                return;
++            auto from = place->window->tab_index(place->tab);
++            if (place->window == target) {
++                auto to = index < 0 || index >= target->tab_count() ? target->tab_count() - 1 : index;
++                target->move_tab(from, to);
++            } else {
++                auto to = index < 0 || index > target->tab_count() ? target->tab_count() : index;
++                place->window->move_tab_to_window(from, *target, to);
++            }
++            if (index >= 0)
++                ++index;
++        });
++        return ok();
++    }
++
++    if (function == "host.tabs.setZoom"sv) {
++        auto place = tab_arg();
++        if (!place.has_value())
++            return fail("No tab with that id"sv);
++        place->tab->view().set_zoom(args.get_double_with_precision_loss("zoomFactor"sv).value_or(1.0));
++        return ok();
++    }
++
++    if (function == "host.tabs.capture"sv) {
++        auto place = tab_arg();
++        if (!place.has_value())
++            return fail("No tab with that id"sv);
++        auto pixmap = place->tab->view().grab();
++        if (pixmap.isNull())
++            return fail("Failed to capture tab: unknown error"sv);
++        auto jpeg = args.get_string("format"sv).value_or({}) != "png"sv;
++        QByteArray bytes;
++        QBuffer buffer(&bytes);
++        buffer.open(QIODevice::WriteOnly);
++        pixmap.save(&buffer, jpeg ? "JPEG" : "PNG", jpeg ? args.get_integer<int>("quality"sv).value_or(92) : -1);
++        auto data_url = ByteString::formatted("{{\"dataUrl\":\"data:image/{};base64,{}\"}}", jpeg ? "jpeg"sv : "png"sv, StringView { bytes.toBase64().constData(), static_cast<size_t>(bytes.toBase64().size()) });
++        return reply(data_url);
++    }
++
++    if (function == "host.tabs.discard"sv)
++        return fail("tabs.discard is not implemented yet in Ladybird"sv);
++
++    if (function == "host.windows.create"sv) {
++        Vector<URL::URL> urls;
++        args.get_array("urls"sv).value_or(JsonArray {}).for_each([&](JsonValue const& value) {
++            if (value.is_string()) {
++                if (auto url = URL::Parser::basic_parse(value.as_string()); url.has_value())
++                    urls.append(*url);
++            }
++        });
++        WindowConfiguration configuration;
++        if (auto x = args.get_integer<int>("left"sv); x.has_value())
++            configuration.x = *x;
++        if (auto y = args.get_integer<int>("top"sv); y.has_value())
++            configuration.y = *y;
++        if (auto w = args.get_integer<int>("width"sv); w.has_value())
++            configuration.width = *w;
++        if (auto h = args.get_integer<int>("height"sv); h.has_value())
++            configuration.height = *h;
++        if (args.get_string("state"sv).value_or({}) == "maximized"sv)
++            configuration.maximized = true;
++        auto is_private = args.get_bool("incognito"sv).value_or(false) ? WebView::IsPrivate::Yes : WebView::IsPrivate::No;
++
++        BrowserWindow* window = nullptr;
++        if (auto moved = tab_arg(); moved.has_value()) {
++            window = &moved->window->detach_tab_to_new_window(moved->window->tab_index(moved->tab), moved->window->geometry().center());
++        } else {
++            if (urls.is_empty())
++                urls.append(WebView::Application::settings().new_tab_page_url());
++            auto popup = args.get_string("type"sv).value_or({}) == "popup"sv ? BrowserWindow::IsPopupWindow::Yes : BrowserWindow::IsPopupWindow::No;
++            window = &application.new_window(urls, configuration, popup, is_private);
++        }
++        auto state = args.get_string("state"sv).value_or({});
++        if (state == "minimized"sv)
++            window->showMinimized();
++        else if (state == "fullscreen"sv)
++            window->showFullScreen();
++        if (args.get_bool("focused"sv).value_or(true) && state != "minimized"sv)
++            window->bring_to_front();
++        report_browser_state();
++        return reply(ByteString::formatted("{{\"windowId\":{}}}", window_id(*window)));
++    }
++
++    if (function == "host.windows.update"sv) {
++        auto* window = window_with_id(args.get_integer<i64>("windowId"sv));
++        if (!window)
++            return fail("No window with that id"sv);
++        auto geometry = window->geometry();
++        if (auto x = args.get_integer<int>("left"sv); x.has_value())
++            geometry.moveLeft(*x);
++        if (auto y = args.get_integer<int>("top"sv); y.has_value())
++            geometry.moveTop(*y);
++        if (auto w = args.get_integer<int>("width"sv); w.has_value())
++            geometry.setWidth(*w);
++        if (auto h = args.get_integer<int>("height"sv); h.has_value())
++            geometry.setHeight(*h);
++        if (geometry != window->geometry())
++            window->setGeometry(geometry);
++        auto state = args.get_string("state"sv).value_or({});
++        if (state == "minimized"sv)
++            window->showMinimized();
++        else if (state == "maximized"sv)
++            window->showMaximized();
++        else if (state == "fullscreen"sv)
++            window->showFullScreen();
++        else if (state == "normal"sv)
++            window->showNormal();
++        if (args.get_bool("focused"sv) == true)
++            window->bring_to_front();
++        else if (args.get_bool("focused"sv) == false)
++            window->lower();
++        if (args.get_bool("drawAttention"sv) == true)
++            QApplication::alert(window);
++        return ok();
++    }
++
++    if (function == "host.windows.remove"sv) {
++        auto* window = window_with_id(args.get_integer<i64>("windowId"sv));
++        if (!window)
++            return fail("No window with that id"sv);
++        window->close();
++        return ok();
++    }
++
++    if (function == "host.action.openPopup"sv) {
++        auto* window = window_with_id(args.get_integer<i64>("windowId"sv));
++        auto url = url_argument(args, "popupUrl"sv);
++        if (!window || !url.has_value())
++            return fail("Could not find an active browser window."sv);
++        auto* area = toolbar_area_of(*window);
++        auto extension_id = WebView::Application::extension_manager()->extension_for_url(url->serialize().bytes_as_string_view()).value_or({});
++        show_popup(*window, extension_id, *url, area ? &area->anchor_for(extension_id) : nullptr);
++        return ok();
++    }
++
++    auto message = ByteString::formatted("{} is not implemented yet in Ladybird", function.substring_view(min<size_t>(5, function.length())));
++    reply(Error::from_string_view(message.view()));
++}
++
++}
++
++}
++
++#endif
+diff --git a/UI/Qt/ExtensionsUI.h b/UI/Qt/ExtensionsUI.h
+new file mode 100644
+index 00000000..8a480501
+--- /dev/null
++++ b/UI/Qt/ExtensionsUI.h
+@@ -0,0 +1,84 @@
++/*
++ * Copyright (c) 2026, cgx-webext contributors
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++#if defined(ENABLE_WEBEXT)
++
++#    include <AK/ByteString.h>
++#    include <AK/Error.h>
++#    include <AK/Function.h>
++#    include <AK/JsonObject.h>
++#    include <AK/StringView.h>
++#    include <AK/Vector.h>
++#    include <AK/kmalloc.h>
++
++#    include <QPointer>
++#    include <QWidget>
++
++class QHBoxLayout;
++class QToolButton;
++class QShortcut;
++
++namespace Ladybird {
++
++class BrowserWindow;
++class Tab;
++
++// The extensions part of a window's toolbar, as in Chrome and Firefox: a button for each extension the user pinned, with
++// its icon and badge, and the extensions button (a puzzle piece), which opens a panel listing every extension.
++class ExtensionsToolbarArea final : public QWidget {
++    Q_OBJECT
++
++public:
++    AK_ALLOC_WITH_KMALLOC;
++
++    explicit ExtensionsToolbarArea(QWidget* parent);
++    virtual ~ExtensionsToolbarArea() override;
++
++    void set_tab(Tab*);
++    // Redraws the buttons from the extension core's state for the shown tab.
++    void refresh();
++
++    // The button an extension's popup hangs from: its own, if pinned, else the extensions button.
++    QWidget& anchor_for(ByteString const& extension_id);
++    void show_panel();
++
++private:
++    BrowserWindow* browser_window() const;
++    void rebuild_shortcuts();
++
++    QHBoxLayout* m_buttons_layout { nullptr };
++    QToolButton* m_puzzle_button { nullptr };
++    Vector<QPointer<QToolButton>> m_action_buttons;
++    Vector<QPointer<QShortcut>> m_shortcuts;
++    QPointer<Tab> m_tab;
++    ByteString m_last_state;
++    ByteString m_last_commands;
++};
++
++namespace Extensions {
++
++// What the Qt application does for the extension core (see WebView::Application's extension_* functions).
++void host_call(ByteString const& extension_id, StringView function, JsonObject const& args, Function<void(ErrorOr<ByteString>)> reply);
++void ui_changed(StringView extension_id, StringView what);
++bool is_popup_view(u64 view_id);
++void popup_request(u64 view_id, StringView name, StringView args_json);
++
++// Starts reporting the browser's windows and tabs to the extension core.
++void start_reporting_browser_state();
++// Reports them now, if anything changed.
++void report_browser_state();
++
++// The user opened an extension (its toolbar button, its entry in the panel, or its shortcut): opens its popup, or tells it
++// it was clicked.
++void open_extension(BrowserWindow&, ByteString const& extension_id, QWidget* anchor);
++
++}
++
++}
++
++#endif
+diff --git a/UI/Qt/WindowToolbar.cpp b/UI/Qt/WindowToolbar.cpp
+index d57975bd..9b056764 100644
+--- a/UI/Qt/WindowToolbar.cpp
++++ b/UI/Qt/WindowToolbar.cpp
+@@ -11,6 +11,9 @@
+ #include <LibWebView/Application.h>
+ #include <LibWebView/DownloadPresentation.h>
+ #include <LibWebView/TabPerformanceMonitor.h>
++#if defined(ENABLE_WEBEXT)
++#    include <UI/Qt/ExtensionsUI.h>
++#endif
+ #include <UI/Qt/Application.h>
+ #include <UI/Qt/BrowserWindow.h>
+ #include <UI/Qt/ChromeLayout.h>
+@@ -1072,6 +1075,10 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
+     toolbar_layout->addWidget(navigation_button_cluster, 0, Qt::AlignVCenter);
+     toolbar_layout->addWidget(location_edit_container, 1);
+     toolbar_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
++#if defined(ENABLE_WEBEXT)
++    m_extensions_area = new ExtensionsToolbarArea(m_toolbar);
++    toolbar_layout->addWidget(m_extensions_area, 0, Qt::AlignVCenter);
++#endif
+     toolbar_layout->addWidget(m_performance_monitor, 0, Qt::AlignVCenter);
+ 
+     if constexpr (!use_native_macos_window_controls()) {
+@@ -1103,6 +1110,10 @@ void WindowToolbar::bind(Tab* tab)
+     if (m_tab)
+         QObject::disconnect(m_tab, nullptr, this, nullptr);
+     m_tab = tab;
++#if defined(ENABLE_WEBEXT)
++    if (m_extensions_area)
++        m_extensions_area->set_tab(tab);
++#endif
+ 
+     // A tab that hasn't loaded has no page yet, so it is shown once it has one.
+     if (!tab || !tab->is_loaded()) {
+diff --git a/UI/Qt/WindowToolbar.h b/UI/Qt/WindowToolbar.h
+index d3c968b4..df40519e 100644
+--- a/UI/Qt/WindowToolbar.h
++++ b/UI/Qt/WindowToolbar.h
+@@ -23,6 +23,7 @@ namespace Ladybird {
+ 
+ class BrowserWindow;
+ class DownloadsButton;
++class ExtensionsToolbarArea;
+ class DownloadsPopover;
+ class LocationEdit;
+ class PerformanceMonitorWidget;
+@@ -61,6 +62,9 @@ public:
+     void show_downloads_popover();
+     void update_downloads_button();
+ 
++    // AD-HOC (cgx-webext): the extension buttons; null without extension support.
++    ExtensionsToolbarArea* extensions_area() const { return m_extensions_area; }
++
+ private:
+     virtual bool event(QEvent*) override;
+ 
+@@ -106,6 +110,7 @@ private:
+     ReloadButton* m_reload_button { nullptr };
+ 
+     DownloadsButton* m_downloads_button { nullptr };
++    ExtensionsToolbarArea* m_extensions_area { nullptr };
+     QPointer<DownloadsPopover> m_downloads_popover;
+     size_t m_completed_download_count { 0 };
  
 diff --git a/UI/cmake/ResourceFiles.cmake b/UI/cmake/ResourceFiles.cmake
 index 46ecf223..7e3d0adb 100644

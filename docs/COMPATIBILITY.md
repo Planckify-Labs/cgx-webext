@@ -2,7 +2,36 @@
 
 <!-- Numbers below come from `Tools/real_world.sh`. Regenerate them with it; they are a snapshot, not a test. -->
 
-How do real, popular, signed extensions fare? `Tools/real_world.sh` downloads them from addons.mozilla.org and runs `webext-coverage inspect` on each. This is **static analysis only**: it reads the manifest and scans the JavaScript for `chrome.*`/`browser.*` use. Nothing here has been *run* in a browser.
+How do real, popular, signed extensions fare? The first section is from running them in Ladybird. The static snapshot further down comes from `Tools/real_world.sh`, which downloads extensions from addons.mozilla.org and runs `webext-coverage inspect` on each (static analysis only).
+
+## Run in Ladybird (11 November 2026)
+
+These six were installed from the stores into Ladybird and their popups opened (off-screen, `--force-cpu-painting`, with
+`--log-all-js-exceptions` and `WEBEXT_TRACE=1`). Coverage is `webext-coverage inspect` on the installed package.
+
+| Extension | Store | Coverage | Popup | Does its job | What is missing |
+|---|---|---:|---|---|---|
+| Ambient light for YouTube 2.38.17 (MV3) | Chrome | 100% | works | **no** | isolated worlds: its content script `import()`s a module that needs `chrome.*` in the content-script world |
+| SponsorBlock 6.1.7 (MV2) | Firefox | 98% | works | not checked on a sponsored video | `webNavigation.onCommitted` |
+| Dark Reader 4.9.135 (MV2) | Firefox | 92% | works, knows the site | **no** | its dark-theme detector reports light pages as dark on Ladybird and removes the theme (cause not found yet); `theme.*` for its optional browser-theme feature |
+| AnyDoc Translator 1.4.31 (MV3) | Chrome | 90% | works | not checked | `cookies`, `i18n.detectLanguage`, `webNavigation`, native messaging, `externally_connectable` |
+| uBlock Origin 1.76.0 (MV2) | Firefox | 67% | works (slow on the first open after install, while it compiles filter lists) | **no**, blocks nothing | `webRequest` (blocking), `webNavigation` |
+| Surfingkeys 1.17.11 (MV2) | Firefox | 57% | works | partly | its in-page panel (an extension page in an iframe) starts without `chrome`; bookmarks, history, downloads, sessions, tab groups, `tts`, `userScripts`, native messaging |
+
+Coverage counts the APIs and manifest features the extension's code uses; the analyzer also lists Chrome-only members
+(`dom.openOrClosedShadowRoot`, `fontSettings`) for Firefox builds that only call them when present.
+
+Problems found by running them and fixed in the same session: popups stayed blank because unimplemented APIs were
+exposed (extensions feature-detect, e.g. uBlock's `browser.publicSuffix`); secure pages refused extension files (mixed
+content, page CSP, Trusted Types for script URLs); content scripts could not `fetch` their web-accessible files;
+relative paths in background scripts resolved under a private folder; `sender.tab.url` lagged navigation; `setIcon`
+resolved paths against the extension root instead of the calling page. The plan for the rest is in
+[specs/webextensions-full-api/roadmap.md](specs/webextensions-full-api/roadmap.md).
+
+## Static snapshot (earlier, outdated)
+
+The table below predates ports, keyboard commands, `tabs`, `windows`, `action`, `contextMenus` and `scripting`, which are
+now implemented; its numbers are kept for comparison.
 
 Snapshot (November 2026, Firefox packages; Manifest version in parentheses):
 

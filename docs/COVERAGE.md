@@ -10,8 +10,8 @@ How much of the Chrome and Firefox extension API surface is covered. Numbers cou
 
 | Browser | Members | core | +host | planned |
 |---|---:|---:|---:|---:|
-| Chrome | 399 | 14.3% | 34.3% | 262 |
-| Firefox | 417 | 12.9% | 31.9% | 284 |
+| Chrome | 399 | 38.6% | 40.6% | 237 |
+| Firefox | 417 | 37.9% | 39.6% | 252 |
 
 ## By namespace
 
@@ -19,17 +19,17 @@ Each cell is `core/+host/total` members available in that browser.
 
 | Namespace | Chrome | Firefox | Planned (Chrome) |
 |---|---:|---:|---:|
-| `action` | 0/16/18 | 0/16/18 | 2 |
+| `action` | 18/18/18 | 18/18/18 | 0 |
 | `alarms` | 6/6/6 | 6/6/6 | 0 |
 | `bookmarks` | 0/0/18 | 0/0/15 | 18 |
 | `browserSettings` | – | 0/0/21 | – |
 | `browsingData` | 0/0/11 | 0/0/11 | 11 |
 | `captivePortal` | – | 0/0/5 | – |
 | `clipboard` | – | 0/0/1 | – |
-| `commands` | 0/0/2 | 0/0/6 | 2 |
-| `contentScripts` | – | 0/0/1 | – |
+| `commands` | 2/2/2 | 5/5/6 | 0 |
+| `contentScripts` | – | 1/1/1 | – |
 | `contentSettings` | – | – | – |
-| `contextMenus` | 0/5/5 | 0/5/10 | 0 |
+| `contextMenus` | 5/5/5 | 6/6/10 | 0 |
 | `contextualIdentities` | – | 0/0/11 | – |
 | `cookies` | 0/6/7 | 0/6/7 | 1 |
 | `declarativeContent` | – | – | – |
@@ -39,19 +39,19 @@ Each cell is `core/+host/total` members available in that browser.
 | `dns` | – | 0/0/1 | – |
 | `dom` | 0/0/1 | – | 1 |
 | `downloads` | 0/0/19 | 0/0/14 | 19 |
-| `extension` | 1/1/8 | 1/1/7 | 7 |
+| `extension` | 4/4/8 | 4/4/7 | 4 |
 | `find` | – | 0/0/3 | – |
 | `fontSettings` | 0/0/17 | – | 17 |
 | `gcm` | 0/0/3 | – | 3 |
 | `history` | 0/0/8 | 0/0/9 | 8 |
-| `i18n` | 2/3/4 | 2/3/5 | 1 |
+| `i18n` | 3/3/4 | 3/3/5 | 1 |
 | `identity` | 0/0/6 | 0/0/2 | 6 |
 | `idle` | 0/0/3 | 0/0/3 | 3 |
-| `management` | 0/0/12 | 0/0/10 | 12 |
+| `management` | 3/3/12 | 3/3/10 | 9 |
 | `notifications` | 0/0/9 | 0/0/6 | 9 |
 | `offscreen` | 0/0/3 | – | 3 |
 | `omnibox` | 0/0/6 | 0/0/6 | 6 |
-| `pageAction` | 0/0/8 | 0/0/10 | 8 |
+| `pageAction` | 8/8/8 | 10/10/10 | 0 |
 | `pageCapture` | 0/0/1 | – | 1 |
 | `permissions` | 6/6/8 | 6/6/6 | 2 |
 | `pkcs11` | – | 0/0/4 | – |
@@ -59,25 +59,28 @@ Each cell is `core/+host/total` members available in that browser.
 | `privacy` | 0/0/3 | 0/0/3 | 3 |
 | `proxy` | – | 0/0/3 | – |
 | `publicSuffix` | 0/0/3 | 0/0/3 | 3 |
-| `runtime` | 10/15/30 | 10/15/31 | 15 |
-| `scripting` | 0/7/7 | 0/7/7 | 0 |
+| `runtime` | 16/17/30 | 17/18/31 | 13 |
+| `scripting` | 7/7/7 | 7/7/7 | 0 |
 | `search` | 0/0/1 | 0/0/3 | 1 |
 | `sessions` | 0/0/4 | 0/0/12 | 4 |
 | `sidePanel` | 0/0/7 | – | 7 |
 | `sidebarAction` | – | 0/0/9 | – |
-| `storage` | 27/27/35 | 24/24/30 | 8 |
+| `storage` | 30/30/35 | 27/27/30 | 5 |
 | `system` | 0/0/4 | – | 4 |
 | `tabCapture` | 0/0/3 | – | 3 |
 | `tabGroups` | 0/0/8 | 0/0/8 | 8 |
-| `tabs` | 3/33/37 | 3/32/44 | 4 |
+| `tabs` | 32/33/37 | 32/32/44 | 4 |
 | `theme` | – | 0/0/4 | – |
 | `topSites` | 0/0/1 | 0/0/1 | 1 |
 | `tts` | 0/0/6 | – | 6 |
 | `userScripts` | 0/0/8 | 0/0/8 | 8 |
 | `webNavigation` | 0/0/11 | 0/0/11 | 11 |
-| `webRequest` | 0/0/10 | 0/0/12 | 10 |
-| `windows` | 2/12/13 | 2/12/12 | 1 |
+| `webRequest` | 1/1/10 | 1/1/12 | 9 |
+| `windows` | 13/13/13 | 12/12/12 | 0 |
 
 Status notes (partial members):
 
+- `extension.isAllowedIncognitoAccess`: Always false: extensions cannot be allowed in private windows yet.
+- `extension.isAllowedFileSchemeAccess`: Always false: extensions cannot be allowed on file:// pages yet.
+- `extension.inIncognitoContext`: Always false: extensions do not run in private windows yet.
 - `storage.managed.get`: Always returns an empty object until enterprise policy is supported.

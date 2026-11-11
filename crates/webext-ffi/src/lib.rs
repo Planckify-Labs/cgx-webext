@@ -721,6 +721,22 @@ pub unsafe extern "C" fn webext_notify_startup(h: *mut WebExtHandle, id: WebExtS
     }
 }
 
+/// What the browser tells the core about itself, or asks it, outside an extension's API call: `browserState` (a snapshot of
+/// windows and tabs), `uiState`, `actionClicked`, `contextMenuItems`, `contextMenuClicked`, `commands`, `command`,
+/// `setShortcut`, `setActionPinned`, `grantActiveTab`. `args_json` is a JSON object. Returns JSON (`null` when there is
+/// nothing to say, `{"error": ...}` on bad input). See `Dispatcher::host_event`.
+///
+/// # Safety
+/// `h` must be a live handle; the strings must be valid for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn webext_host_event(h: *mut WebExtHandle, name: WebExtStr, args_json: WebExtStr) -> WebExtString {
+    let (Some(handle), Some(name), Some(args)) = (handle(h), str_of(name), str_of(args_json)) else { return WebExtString::NULL };
+    let Ok(args) = serde_json::from_str::<Value>(args) else {
+        return WebExtString::from_string(json!({ "error": "args must be JSON" }).to_string());
+    };
+    guard(WebExtString::NULL, || WebExtString::from_string(handle.dispatcher.host_event(name, &args).to_string()))
+}
+
 // ---- Extension stores (see webext::store) ----
 
 /// `"chrome"` for Chrome Web Store pages, `"firefox"` for addons.mozilla.org pages, otherwise a null string.

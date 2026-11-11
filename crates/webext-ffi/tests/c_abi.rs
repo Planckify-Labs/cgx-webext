@@ -54,7 +54,7 @@ fn c_program_drives_the_library() {
     std::fs::create_dir_all(pkg_dir.join("public")).unwrap();
     std::fs::write(
         pkg_dir.join("manifest.json"),
-        r#"{"manifest_version":3,"name":"C ABI Test","version":"1.0","permissions":["storage","alarms"],"optional_permissions":["history"],
+        r#"{"manifest_version":3,"name":"C ABI Test","version":"1.0","permissions":["storage","alarms","cookies","tabs"],"optional_permissions":["history"],
             "background":{"service_worker":"bg.js"},
             "content_scripts":[{"matches":["https://example.com/*"],"js":["content.js"]}],
             "web_accessible_resources":[{"resources":["public/*"],"matches":["https://example.com/*"]}]}"#,

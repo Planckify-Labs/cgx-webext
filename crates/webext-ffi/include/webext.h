@@ -137,6 +137,23 @@ void webext_tick(WebExtHandle* h);
 void webext_notify_installed(WebExtHandle* h, WebExtStr id, WebExtStr reason, WebExtStr previous_version);
 void webext_notify_startup(WebExtHandle* h, WebExtStr id);
 
+/* The browser's side of the conversation that is not an extension API call (see Dispatcher::host_event in the core):
+ *   "browserState"       {windows:[{id,type,state,focused,incognito,left,top,width,height,tabs:[{id,active,pinned,url,title,
+ *                         favIconUrl,status,audible,muted,width,height,openerTabId,zoom}]}],lastFocusedWindowId}
+ *                         Report it whenever a window or tab changes, and before answering a host.* call that changed one.
+ *   "uiState"            {tabId}                          -> toolbar state of every extension
+ *   "actionClicked"      {extensionId,tabId}              -> {"popup":url} to open, or {"clicked":true}
+ *   "setActionPinned"    {extensionId,pinned}
+ *   "contextMenuItems"   {tabId,pageUrl,frameUrl,frameId,linkUrl,srcUrl,mediaType,selectionText,editable,contexts}
+ *                                                         -> [{extensionId,name,items:[{id,title,type,checked,enabled,children}]}]
+ *   "contextMenuClicked" {extensionId,itemId,tabId,...same target fields}
+ *   "commands"           {}                               -> [{extensionId,name,description,shortcut}]
+ *   "command"            {extensionId,name,tabId}         -> like actionClicked for _execute_* commands
+ *   "setShortcut"        {extensionId,name,shortcut}      -> {"ok":true} or {"error":...}
+ *   "grantActiveTab"     {extensionId,tabId}
+ * Returns JSON; release it with webext_string_free. */
+WebExtString webext_host_event(WebExtHandle* h, WebExtStr name, WebExtStr args_json);
+
 /* ---- Extension stores: the Chrome Web Store and addons.mozilla.org (see docs/STORES.md) ----
  * webext_content_script_programs also returns the store program, under the extension id "__store__", for documents on a
  * store's origin. Honour that bridge only in documents the browser itself knows to be on that origin. */

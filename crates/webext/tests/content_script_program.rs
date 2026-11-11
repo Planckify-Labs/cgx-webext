@@ -70,8 +70,9 @@ if (waitForRoot) { log.push('before root'); page.insertRoot(); }
 const send = (id, m) => handlers[id](JSON.stringify(m));
 for (const id of Object.keys(handlers)) send(id, { kind: 'run', stage: 'document_end' });
 for (const id of Object.keys(handlers)) { send(id, { kind: 'run', stage: 'document_idle' }); send(id, { kind: 'run', stage: 'document_idle' }); }
-const leaked = Object.getOwnPropertyNames(ctx).filter((n) => !before.has(n));
-console.log(JSON.stringify({ log, leaked, appended, pageChrome: typeof ctx.chrome, pageBrowser: typeof ctx.browser }));
+// `chrome` is put there on purpose (Chrome has one on every page); it is checked to be empty below.
+const leaked = Object.getOwnPropertyNames(ctx).filter((n) => !before.has(n) && n !== 'chrome');
+console.log(JSON.stringify({ log, leaked, appended, pageChrome: typeof ctx.chrome, pageBrowser: typeof ctx.browser, pageChromeKeys: ctx.chrome ? Object.keys(ctx.chrome) : null }));
 "#;
 
 #[test]
@@ -148,7 +149,11 @@ fn programs_run_in_order_with_their_own_api_and_leak_nothing() {
             ),
             ("start2.js", "log.push('A start2 ' + shared());"),
             ("end.js", "var tricky = '</script>\u{2028}'; log.push('A end');"),
-            ("idle.js", "log.push('A idle ' + (typeof browser.runtime.getURL) + ' ' + shared() + ' ' + fromStart); undeclaredGlobal = 1;"),
+            // A Chrome-style extension gets `chrome` only, as in Chrome: extensions test `typeof browser`.
+            (
+                "idle.js",
+                "log.push('A idle ' + (typeof chrome.runtime.getURL) + ' ' + (typeof browser) + ' ' + shared() + ' ' + fromStart); undeclaredGlobal = 1;",
+            ),
             ("boom.js", "throw new Error('boom');"),
             ("s.css", "body { color: red }"),
         ],
@@ -174,7 +179,7 @@ fn programs_run_in_order_with_their_own_api_and_leak_nothing() {
             "A start aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "A start2 shared",
             "A end",
-            "A idle function shared const-from-start",
+            "A idle function undefined shared const-from-start",
             "error:boom",
             "B idle bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ]),
@@ -183,5 +188,7 @@ fn programs_run_in_order_with_their_own_api_and_leak_nothing() {
     assert_eq!(result["appended"], json!(["body { color: red }"]));
     // Sloppy-mode globals a content script creates on purpose are visible, as in a main-world script; nothing else is.
     assert_eq!(result["leaked"], json!(["undeclaredGlobal"]), "the shim, the API and the bridge must not leak onto the page");
-    assert_eq!((result["pageChrome"].as_str(), result["pageBrowser"].as_str()), (Some("undefined"), Some("undefined")));
+    // As in Chrome, the page has a `chrome` object but no extension API on it, and no `browser`.
+    assert_eq!((result["pageChrome"].as_str(), result["pageBrowser"].as_str()), (Some("object"), Some("undefined")));
+    assert_eq!(result["pageChromeKeys"], json!([]));
 }

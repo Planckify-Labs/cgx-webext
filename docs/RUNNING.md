@@ -1,5 +1,15 @@
 # Running Ladybird with extensions
 
+## Quickest way
+
+```sh
+cd /home/cstralpt/cgx-translation-research/cgx-webext
+scripts/run-ladybird.sh --demo https://example.com/
+```
+
+`scripts/run-ladybird.sh --help` lists the options (`--demo`, `--trace`, `--fresh`, `--build`). Any extension directory or
+`.crx`/`.xpi`/`.zip` you pass is loaded; URLs and Ladybird's own flags pass through.
+
 ## The build on this machine
 
 Already built, with extension support, at:
@@ -81,32 +91,70 @@ Check what a package needs before you load it:
 cd $CGX && cargo run -q -p webext-cli -- inspect ~/extensions/eimadpbcbfnmbkopoojfekhnkhdbieeh.crx
 ```
 
+## 3. The extension UI
+
+Every window's toolbar has, right of the address field:
+
+- a **button for each pinned extension**, with its icon and badge text. Click it to open the extension's **popup**: a
+  small panel under the button, sized to the popup page (up to 800×600), closed by Escape, a click outside, or the page
+  calling `window.close()`. An extension without a popup gets `action.onClicked` instead. Right-click the button for the
+  extension's own "action" menu items, Options, Unpin and Remove.
+- the **extensions button** (puzzle piece). It opens a panel listing every installed extension with its icon, name and
+  what it can access on the current site; click a row to open that extension, the pin to put it on the toolbar, ⋮ for
+  Options and Remove. "Find more extensions" opens the Chrome Web Store or Firefox Add-ons.
+
+Extensions' context-menu items appear at the end of the page, link, image and media menus, and their keyboard shortcuts
+(`commands` in the manifest, e.g. Alt+Shift+E) work in every window.
+
+### A test extension that exercises all of it
+
+```sh
+$LB --load-extension $CGX/Integration/ladybird/demo/toolbar-extension https://example.com/
+```
+
+- the toolbar button's badge shows the number of open tabs (`tabs.query`, `tabs.onCreated/onRemoved`, `setBadgeText`);
+- its popup lists the window's tabs and has buttons for `scripting.executeScript`, `tabs.create`,
+  `runtime.openOptionsPage`, messaging the service worker, and setting the badge;
+- right-click a page for "Outline this page", select text for "Log … in the popup history";
+- Alt+Shift+M outlines the page from the service worker (`commands.onCommand` + `scripting.executeScript`).
+
+### Seeing what an extension does
+
+```sh
+WEBEXT_TRACE=1 $LB --load-extension ...
+```
+
+prints every extension API call with its arguments and answer, and every message and event delivered to an extension
+context. When an extension misbehaves, the first `FAILED` or the last call before it stops usually names the cause.
+
 ## What to expect
 
-These work, and were tested in this build with the demo extension in Chrome and Firefox form:
+These work, tested in this build:
 
-- extension pages (`chrome-extension://…`, `moz-extension://…`) with their own origin
-- background pages, scripts and service workers (run as hidden pages)
-- content scripts at `document_start`, `document_end` and `document_idle`, with CSS
-- `chrome.*` and `browser.*` (callbacks, promises, `lastError`)
-- `storage`, `i18n`, `alarms`, `permissions`, `runtime` messaging and ports between pages and content scripts
+- installing from the Chrome Web Store and addons.mozilla.org, and `--load-extension`
+- extension pages, background pages and scripts, service workers (run as hidden pages)
+- content scripts at all three stages; `chrome.*` only for Chrome extensions, `browser.*` too for Firefox ones
+- `storage`, `i18n`, `alarms`, `permissions`, messaging and ports
+- `tabs`, `windows`, `action`/`browserAction`/`pageAction`, `contextMenus`/`menus`, `commands`, `scripting`,
+  Firefox's `tabs.executeScript`, `runtime.openOptionsPage`, `management.getSelf`
+- popups open once their page has loaded (as in Chrome), sized to their content
+- the popups of uBlock Origin, Dark Reader, SponsorBlock, Ambient light for YouTube, AnyDoc Translator and Surfingkeys;
+  see [COMPATIBILITY.md](COMPATIBILITY.md) for what each of them does and does not do yet
 
 These do not work yet:
 
-- **Most real extensions only partly work.** Dark Reader (Chrome and Firefox builds) loads, its background starts and
-  its content scripts run, but it does not darken pages yet. It needs `tabs.query` and similar browser APIs, which
-  still answer "This browser extension API is not implemented yet". The terminal shows these errors.
-- No toolbar button, popup window or extensions page in the UI. Open extension pages by URL.
-- `tabs`, `windows`, `action`, `contextMenus`, `cookies`, `scripting`, `webRequest`, `declarativeNetRequest` and
-  `webNavigation` are not implemented, so ad blockers such as uBlock Origin will not block anything.
-- Content scripts share the page's JavaScript world (Chrome's "MAIN" world). A hostile page can tamper with them,
-  so only try extensions on sites you trust.
-- Signatures of `.crx`/`.xpi` files are not verified. Store installs are downloaded over HTTPS from the store and
-  checked against the id or hash the store gave, which is what ties them to the store.
-- Extensions cannot be disabled, only removed.
+- `webRequest`, `declarativeNetRequest`, `webNavigation`, `cookies`: ad blockers such as uBlock Origin open their popup but
+  block nothing ("0 blocked").
+- Content scripts share the page's JavaScript world (no isolated worlds). Extensions whose content scripts `import()`
+  modules that use `chrome.*`, such as Ambient light for YouTube, do not work, and a hostile page can tamper with content
+  scripts. Try extensions on sites you trust.
+- Dark Reader shows its popup but does not darken pages yet.
+- No extensions manager page; remove extensions from the extensions panel. They cannot be disabled, only removed.
+- Signatures of `.crx`/`.xpi` files are not verified; store installs are checked against the id or hash the store gave.
 
-When an extension does not work, the terminal messages (`Unhandled JavaScript exception`, `not implemented yet`)
-usually name the missing piece.
+The plan for everything that is missing: [specs/webextensions-full-api/roadmap.md](specs/webextensions-full-api/roadmap.md).
+
+Unimplemented APIs fail with "<name> is not implemented yet in Ladybird" in the terminal.
 
 ## Rebuilding after changes
 
@@ -115,6 +163,9 @@ cd /home/cstralpt/cgx-translation-research/ladybird
 ninja -C Build/release -j8 ladybird
 ```
 
-Let builds finish. Interrupting `ninja` can damage its log, and the next build then recompiles almost everything.
+Let builds finish. Interrupting `ninja` can damage its dependency log (`ninja: warning: premature end of file;
+recovering`), after which every build recompiles almost everything. Repair it with
+`ninja -C Build/release -t recompact` and let one build complete; after that a build with no changes says "no work to
+do" in under a second.
 
 To put the integration on another Ladybird checkout, see [Integration/README.md](../Integration/README.md).

@@ -2,6 +2,8 @@
 
 pub mod alarms;
 pub mod analyze;
+pub mod browser;
+pub mod browser_api;
 pub mod bus;
 pub mod content_scripts;
 pub mod dispatch;
@@ -19,4 +21,5 @@ pub mod resources;
 pub mod serve;
 pub mod storage;
 pub mod store;
+pub mod ui;
 pub mod zip;

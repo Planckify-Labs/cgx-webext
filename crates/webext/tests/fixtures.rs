@@ -98,7 +98,7 @@ fn storage_popup_full_flow() {
         assert!(used.contains(&expected), "{expected} not detected in {used:?}");
     }
     let tabs_query = report.apis.iter().find(|a| a.name == "tabs.query").unwrap();
-    assert_eq!(tabs_query.support, Support::Known(Status::Delegated));
+    assert_eq!(tabs_query.support, Support::Known(Status::Implemented));
     assert_eq!(tabs_query.files, ["popup.js"]);
 
     // Install it and replay what its scripts do.
@@ -125,8 +125,15 @@ fn storage_popup_full_flow() {
     assert_eq!(call(&d, &id, "i18n.getMessage", vec![json!("extDescription")]).unwrap(), "Counts alarm ticks.");
     assert_eq!(call(&d, &id, "runtime.getURL", vec![json!("popup.html")]).unwrap(), "moz-extension://1234/popup.html");
 
-    // Delegated call reaches the host; an optional permission can be requested.
-    assert_eq!(call(&d, &id, "tabs.query", vec![json!({"active": true})]).unwrap()["via"], "tabs.query");
+    // tabs.query is answered from the browser's snapshot; an optional permission can be requested.
+    d.host_event(
+        "browserState",
+        &json!({"windows": [{"id": 1, "focused": true, "tabs": [
+        {"id": 5, "url": "https://a.test/", "title": "A", "active": true}, {"id": 6, "url": "https://b.test/"}]}]}),
+    );
+    let active = call(&d, &id, "tabs.query", vec![json!({"active": true, "currentWindow": true})]).unwrap();
+    assert_eq!(active.as_array().map(|a| a.iter().map(|t| t["id"].as_i64()).collect::<Vec<_>>()), Some(vec![Some(5)]));
+    assert!(host.events.borrow().iter().any(|(e, _)| e == "tabs.onCreated"), "tabs that appear fire tabs.onCreated");
     assert_eq!(call(&d, &id, "permissions.request", vec![json!({"permissions": ["history"]})]).unwrap(), json!(true));
 
     // The history API is planned, so even with the permission it fails clearly.
@@ -148,9 +155,9 @@ fn mv2_blocking_webrequest_is_blocked() {
     assert_eq!(report.verdict, Verdict::Blocked);
     assert!(report.blockers.contains(&"webRequest.onBeforeRequest".to_string()));
     assert!(report.blockers.contains(&"blocking webRequest".to_string()));
-    // browserAction resolves to action through the alias table, and is delegated.
+    // browserAction resolves to action through the alias table; the core keeps the badge.
     let badge = report.apis.iter().find(|a| a.name == "action.setBadgeText").expect("alias resolved");
-    assert_eq!(badge.support, Support::Known(Status::Delegated));
+    assert_eq!(badge.support, Support::Known(Status::Implemented));
 }
 
 #[test]

@@ -11,9 +11,8 @@
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "implemented": ["getManifest", "getURL", "connect", "sendMessage"],
-        "delegated": ["openOptionsPage", "reload", "getPlatformInfo", "setUninstallURL"],
-        "planned": ["connectNative", "sendNativeMessage", "getBackgroundPage", "requestUpdateCheck", "restart", "getContexts", "getPackageDirectoryEntry", "getBrowserInfo", "getDocumentId", "getFrameId", "getVersion"]
+        "implemented": ["getManifest", "getURL", "connect", "sendMessage", "openOptionsPage", "reload", "getPlatformInfo", "setUninstallURL", "getBrowserInfo", "getContexts", "getVersion"],
+        "planned": ["connectNative", "sendNativeMessage", "getBackgroundPage", "requestUpdateCheck", "restart", "getPackageDirectoryEntry", "getDocumentId", "getFrameId"]
       },
       "events": {
         "implemented": ["onInstalled", "onStartup", "onMessage", "onConnect"],
@@ -40,10 +39,12 @@
       "engines": ["chrome", "firefox"],
       "functions": {
         "implemented": ["getURL"],
-        "planned": ["getBackgroundPage", "getViews", "isAllowedIncognitoAccess", "isAllowedFileSchemeAccess", "setUpdateUrlData"]
+        "planned": ["getBackgroundPage", "getViews", "setUpdateUrlData"],
+        "partial": ["isAllowedIncognitoAccess", "isAllowedFileSchemeAccess"]
       },
       "properties": {
-        "planned": ["inIncognitoContext", "lastError"]
+        "planned": ["lastError"],
+        "partial": ["inIncognitoContext"]
       },
       "mv": {
         "getBackgroundPage": [2],
@@ -52,6 +53,11 @@
       },
       "only": {
         "setUpdateUrlData": "chrome"
+      },
+      "notes": {
+        "isAllowedIncognitoAccess": "Always false: extensions cannot be allowed in private windows yet.",
+        "isAllowedFileSchemeAccess": "Always false: extensions cannot be allowed on file:// pages yet.",
+        "inIncognitoContext": "Always false: extensions do not run in private windows yet."
       }
     },
     "storage": {
@@ -63,8 +69,8 @@
         "planned": ["local.setAccessLevel", "session.setAccessLevel", "sync.setAccessLevel", "managed.getBytesInUse"]
       },
       "events": {
-        "implemented": ["onChanged"],
-        "planned": ["local.onChanged", "sync.onChanged", "session.onChanged", "managed.onChanged"]
+        "implemented": ["onChanged", "local.onChanged", "sync.onChanged", "session.onChanged"],
+        "planned": ["managed.onChanged"]
       },
       "properties": {
         "implemented": ["sync.QUOTA_BYTES", "sync.QUOTA_BYTES_PER_ITEM", "sync.MAX_ITEMS", "sync.MAX_WRITE_OPERATIONS_PER_HOUR", "sync.MAX_WRITE_OPERATIONS_PER_MINUTE", "local.QUOTA_BYTES", "session.QUOTA_BYTES"]
@@ -85,8 +91,7 @@
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "implemented": ["getMessage", "getUILanguage"],
-        "delegated": ["getAcceptLanguages"],
+        "implemented": ["getMessage", "getUILanguage", "getAcceptLanguages"],
         "planned": ["detectLanguage", "getPreferredSystemLanguages"]
       },
       "only": {
@@ -122,13 +127,12 @@
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "delegated": ["query", "get", "getCurrent", "create", "update", "remove", "reload", "duplicate", "goBack", "goForward", "move", "highlight", "captureVisibleTab", "detectLanguage", "discard", "getZoom", "setZoom", "executeScript", "insertCSS", "removeCSS"],
         "planned": ["group", "ungroup", "toggleReaderMode", "saveAsPDF", "print", "printPreview", "getZoomSettings", "setZoomSettings", "warmup", "hide", "show", "captureTab", "moveInSuccession"],
-        "implemented": ["connect", "sendMessage"]
+        "implemented": ["connect", "sendMessage", "query", "get", "getCurrent", "create", "update", "remove", "reload", "duplicate", "goBack", "goForward", "move", "highlight", "captureVisibleTab", "detectLanguage", "discard", "getZoom", "setZoom", "executeScript", "insertCSS", "removeCSS"]
       },
       "events": {
-        "delegated": ["onCreated", "onUpdated", "onRemoved", "onActivated", "onMoved", "onAttached", "onDetached", "onReplaced", "onHighlighted", "onZoomChange"],
-        "planned": []
+        "delegated": ["onReplaced"],
+        "implemented": ["onCreated", "onUpdated", "onRemoved", "onActivated", "onMoved", "onAttached", "onDetached", "onHighlighted", "onZoomChange"]
       },
       "properties": {
         "implemented": ["TAB_ID_NONE"]
@@ -151,21 +155,19 @@
         "insertCSS": [2],
         "removeCSS": [2]
       },
-      "perm_overrides": {
-        "executeScript": "tabs",
-        "insertCSS": "tabs",
-        "removeCSS": "tabs"
+      "notes": {
+        "highlight": "Ladybird's tab strip has no multi-selection: highlighting activates the first tab given.",
+        "detectLanguage": "Reports the document's declared language (the lang attribute), not a guess from its text."
       }
     },
     "windows": {
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "delegated": ["get", "getCurrent", "getLastFocused", "getAll", "create", "update", "remove"]
+        "implemented": ["get", "getCurrent", "getLastFocused", "getAll", "create", "update", "remove"]
       },
       "events": {
-        "delegated": ["onCreated", "onRemoved", "onFocusChanged"],
-        "planned": ["onBoundsChanged"]
+        "implemented": ["onCreated", "onRemoved", "onFocusChanged", "onBoundsChanged"]
       },
       "properties": {
         "implemented": ["WINDOW_ID_NONE", "WINDOW_ID_CURRENT"]
@@ -178,29 +180,27 @@
       "permission": "scripting",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "delegated": ["executeScript", "insertCSS", "removeCSS", "registerContentScripts", "unregisterContentScripts", "getRegisteredContentScripts", "updateContentScripts"]
+        "implemented": ["executeScript", "insertCSS", "removeCSS", "registerContentScripts", "unregisterContentScripts", "getRegisteredContentScripts", "updateContentScripts"]
       }
     },
     "action": {
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "delegated": ["setTitle", "getTitle", "setIcon", "setPopup", "getPopup", "setBadgeText", "getBadgeText", "setBadgeBackgroundColor", "getBadgeBackgroundColor", "setBadgeTextColor", "getBadgeTextColor", "enable", "disable", "isEnabled", "openPopup"],
-        "planned": ["getUserSettings"]
+        "implemented": ["setTitle", "getTitle", "setIcon", "setPopup", "getPopup", "setBadgeText", "getBadgeText", "setBadgeBackgroundColor", "getBadgeBackgroundColor", "setBadgeTextColor", "getBadgeTextColor", "enable", "disable", "isEnabled", "openPopup", "getUserSettings"]
       },
       "events": {
-        "delegated": ["onClicked"],
-        "planned": ["onUserSettingsChanged"]
+        "implemented": ["onClicked", "onUserSettingsChanged"]
       }
     },
     "pageAction": {
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["show", "hide", "isShown", "setTitle", "getTitle", "setIcon", "setPopup", "getPopup", "openPopup"]
+        "implemented": ["show", "hide", "isShown", "setTitle", "getTitle", "setIcon", "setPopup", "getPopup", "openPopup"]
       },
       "events": {
-        "planned": ["onClicked"]
+        "implemented": ["onClicked"]
       },
       "mv": {
         "show": [2],
@@ -218,12 +218,12 @@
       "permission": "contextMenus",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "delegated": ["create", "update", "remove", "removeAll"],
-        "planned": ["refresh", "overrideContext", "getTargetElement"]
+        "planned": ["overrideContext", "getTargetElement"],
+        "implemented": ["create", "update", "remove", "removeAll", "refresh"]
       },
       "events": {
-        "delegated": ["onClicked"],
-        "planned": ["onShown", "onHidden"]
+        "planned": ["onShown", "onHidden"],
+        "implemented": ["onClicked"]
       },
       "only": {
         "getTargetElement": "firefox",
@@ -240,10 +240,11 @@
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["getAll", "update", "reset", "openShortcutSettings"]
+        "planned": ["openShortcutSettings"],
+        "implemented": ["getAll", "update", "reset"]
       },
       "events": {
-        "planned": ["onCommand", "onChanged"]
+        "implemented": ["onCommand", "onChanged"]
       },
       "only": {
         "onChanged": "firefox",
@@ -277,7 +278,8 @@
       "permission": "webRequest",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["handlerBehaviorChanged", "filterResponseData", "getSecurityInfo"]
+        "planned": ["filterResponseData", "getSecurityInfo"],
+        "implemented": ["handlerBehaviorChanged"]
       },
       "events": {
         "planned": ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onAuthRequired", "onBeforeRedirect", "onResponseStarted", "onCompleted", "onErrorOccurred"]
@@ -287,7 +289,8 @@
         "getSecurityInfo": "firefox"
       },
       "notes": {
-        "*": "Blocking handlers need 'webRequestBlocking'; Chrome allows them only for force-installed MV2 extensions."
+        "*": "Blocking handlers need 'webRequestBlocking'; Chrome allows them only for force-installed MV2 extensions.",
+        "handlerBehaviorChanged": "Resolves at once: the browser keeps no cache of webRequest decisions to flush."
       }
     },
     "declarativeNetRequest": {
@@ -415,7 +418,8 @@
       "permission": "management",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["getAll", "get", "getSelf", "setEnabled", "uninstall", "uninstallSelf", "getPermissionWarningsById", "getPermissionWarningsByManifest", "install"]
+        "planned": ["setEnabled", "uninstall", "uninstallSelf", "getPermissionWarningsById", "getPermissionWarningsByManifest", "install"],
+        "implemented": ["getSelf", "getAll", "get"]
       },
       "events": {
         "planned": ["onInstalled", "onUninstalled", "onEnabled", "onDisabled"]
@@ -425,6 +429,9 @@
         "getPermissionWarningsByManifest": "chrome",
         "install": "firefox",
         "uninstall": "chrome"
+      },
+      "perm_overrides": {
+        "getSelf": null
       }
     },
     "search": {
@@ -680,7 +687,7 @@
       "permission": null,
       "engines": ["firefox"],
       "functions": {
-        "planned": ["register"]
+        "implemented": ["register"]
       }
     },
     "dom": {

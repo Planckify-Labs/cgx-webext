@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Ladybird Extension Test</title>
+<style>
+  body { width: 320px; margin: 0; font: 13px system-ui, sans-serif; color: #1f1f1f; background: #fff; }
+  header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #e3e3e3; }
+  header img { width: 24px; height: 24px; }
+  header h1 { font-size: 14px; margin: 0; }
+  section { padding: 10px 14px; border-bottom: 1px solid #f0f0f0; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #666; margin: 0 0 6px; }
+  ul { margin: 0; padding-left: 16px; max-height: 120px; overflow: auto; }
+  button { font: inherit; padding: 5px 10px; border-radius: 6px; border: 1px solid #c8c8c8; background: #f7f7f7; cursor: pointer; }
+  button:hover { background: #ececec; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; }
+  input { font: inherit; width: 60px; padding: 4px; }
+  #status { color: #2e7dd2; min-height: 1.2em; }
+</style>
+</head>
+<body>
+<header><img src="icon32.png" alt=""><h1>Ladybird Extension Test</h1></header>
+<section>
+  <h2>Active tab</h2>
+  <div id="active">…</div>
+</section>
+<section>
+  <h2>Tabs in this window</h2>
+  <ul id="tabs"></ul>
+</section>
+<section>
+  <h2>Try it</h2>
+  <div class="row">
+    <button id="outline">Outline page</button>
+    <button id="newtab">Open a tab</button>
+    <button id="options">Options</button>
+    <button id="ping">Ping worker</button>
+  </div>
+  <div class="row" style="margin-top:6px">
+    Badge: <input id="badge" maxlength="4"> <button id="setbadge">Set</button>
+  </div>
+  <p id="status"></p>
+</section>
+<section>
+  <h2>History</h2>
+  <ul id="history"></ul>
+</section>
+<script src="popup.js"></script>
+</body>
+</html>

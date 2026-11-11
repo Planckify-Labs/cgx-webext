@@ -12,7 +12,7 @@ cargo build -q -p webext-ffi
 
 mkdir -p "$tmp/pkg/public"
 cat > "$tmp/pkg/manifest.json" <<'JSON'
-{"manifest_version":3,"name":"C ABI Test","version":"1.0","permissions":["storage","alarms"],"optional_permissions":["history"],
+{"manifest_version":3,"name":"C ABI Test","version":"1.0","permissions":["storage","alarms","cookies","tabs"],"optional_permissions":["history"],
  "background":{"service_worker":"bg.js"},
  "content_scripts":[{"matches":["https://example.com/*"],"js":["content.js"]}],
  "web_accessible_resources":[{"resources":["public/*"],"matches":["https://example.com/*"]}]}

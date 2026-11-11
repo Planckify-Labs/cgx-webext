@@ -237,11 +237,12 @@ impl Registry {
                             .and_then(|m| m.get(name))
                             .and_then(Value::as_array)
                             .map(|a| a.iter().filter_map(Value::as_u64).map(|n| n as u32).collect());
-                        let permission = perm_overrides
-                            .and_then(|p| p.get(name))
-                            .and_then(Value::as_str)
-                            .map(String::from)
-                            .or_else(|| ns_permission.clone());
+                        // An override of null means the member needs no permission although its namespace does.
+                        let permission = match perm_overrides.and_then(|p| p.get(name)) {
+                            Some(Value::String(p)) => Some(p.clone()),
+                            Some(Value::Null) => None,
+                            _ => ns_permission.clone(),
+                        };
                         let note = notes.and_then(|n| n.get(name).or_else(|| n.get("*"))).and_then(Value::as_str).map(String::from);
                         let idx = reg.members.len();
                         reg.members.push(Member {
@@ -332,10 +333,19 @@ impl Registry {
     /// The API surface visible to an extension: namespaces and members whose permission is granted, as JSON for the
     /// JavaScript shim: `{ "storage": { "functions": ["local.get", ...], "events": [...], "properties": [...] }, ... }`.
     /// Planned/unsupported members are included so that calling them fails with a clear error instead of `undefined`.
-    pub fn surface_json(&self, manifest_version: u32, has_permission: &dyn Fn(&str) -> bool) -> Value {
+    /// The API an extension sees: what its browser (`engine`) offers in its manifest version, with the permissions it holds.
+    ///
+    /// Functions and properties that are not available yet are left out, so that they are `undefined` as in a browser that
+    /// does not offer them: extensions test for an API (`if (browser.publicSuffix)`) and fall back to their own code. Events
+    /// are kept, so that registering a listener does not throw; they fire once implemented. A namespace with nothing left in
+    /// it is left out too.
+    pub fn surface_json(&self, manifest_version: u32, engine: Engine, has_permission: &dyn Fn(&str) -> bool) -> Value {
         let mut out = serde_json::Map::new();
         for m in &self.members {
-            if !m.available_in_manifest_version(manifest_version) {
+            if !m.available_in_manifest_version(manifest_version) || !m.available_in(engine) {
+                continue;
+            }
+            if m.kind != Kind::Event && matches!(m.status, Status::Planned | Status::Unsupported) {
                 continue;
             }
             if let Some(p) = &m.permission
@@ -352,6 +362,7 @@ impl Registry {
             };
             entry[list].as_array_mut().expect("initialised as array").push(Value::String(m.name.clone()));
         }
+        out.retain(|_, entry| ["functions", "events", "properties"].iter().any(|k| entry[*k].as_array().is_some_and(|a| !a.is_empty())));
         Value::Object(out)
     }
 }
@@ -384,7 +395,8 @@ mod tests {
         assert!(!sa.in_chrome && sa.in_firefox);
         let ex = r.lookup("tabs.executeScript").unwrap();
         assert!(ex.available_in_manifest_version(2) && !ex.available_in_manifest_version(3));
-        assert_eq!(ex.permission.as_deref(), Some("tabs"));
+        // Like in Chrome and Firefox it needs host permission for the page, which dispatch checks, not an API permission.
+        assert_eq!(ex.permission, None);
     }
 
     #[test]
@@ -419,13 +431,25 @@ mod tests {
     #[test]
     fn surface_respects_permissions_and_manifest_version() {
         let r = Registry::builtin();
-        let none = r.surface_json(3, &|_| false);
+        let none = r.surface_json(3, Engine::Chrome, &|_| false);
         assert!(none.get("storage").is_none());
         assert!(none.get("runtime").is_some());
         assert!(none["tabs"]["functions"].as_array().unwrap().iter().all(|f| f != "executeScript"));
-        let with = r.surface_json(3, &|p| p == "storage");
+        let with = r.surface_json(3, Engine::Chrome, &|p| p == "storage");
         assert!(with["storage"]["functions"].as_array().unwrap().iter().any(|f| f == "local.get"));
-        let mv2 = r.surface_json(2, &|_| true);
+        let mv2 = r.surface_json(2, Engine::Chrome, &|_| true);
         assert!(mv2["tabs"]["functions"].as_array().unwrap().iter().any(|f| f == "executeScript"));
+        // What is not available yet is undefined, so that feature detection takes the fallback; events stay attachable.
+        assert!(mv2.get("publicSuffix").is_none() && mv2.get("privacy").is_none());
+        assert!(mv2["downloads"]["functions"].as_array().unwrap().is_empty());
+        assert!(mv2["webRequest"]["events"].as_array().unwrap().iter().any(|e| e == "onBeforeRequest"));
+        // Each browser's own members only.
+        assert!(mv2.get("sidebarAction").is_none());
+        let firefox = r.surface_json(2, Engine::Firefox, &|_| true);
+        assert!(
+            firefox.get("sidebarAction").is_some()
+                || firefox["runtime"]["functions"].as_array().unwrap().iter().any(|f| f == "getBrowserInfo")
+        );
+        assert!(mv2["runtime"]["functions"].as_array().unwrap().iter().all(|f| f != "getBrowserInfo"));
     }
 }

@@ -32,7 +32,63 @@
   });
 
   Object.defineProperty(globalThis, 'chrome', { value: api.chrome, writable: true, configurable: true });
-  Object.defineProperty(globalThis, 'browser', { value: api.browser, writable: true, configurable: true });
+  // Firefox gives extensions both namespaces; Chrome only `chrome`, and extensions test `typeof browser` to tell them apart.
+  if (init.dialect === 'firefox') Object.defineProperty(globalThis, 'browser', { value: api.browser, writable: true, configurable: true });
+  // An extension's popup sizes itself to its content, as in Chrome and Firefox, and closes with window.close().
+  if (init.isPopup) {
+    const measure = () => {
+      const root = document.documentElement;
+      const body = document.body;
+      if (!root) return null;
+      // The width the content wants: lay the root out at its max-content width for a moment.
+      const old = root.style.getPropertyValue('width');
+      const oldPriority = root.style.getPropertyPriority('width');
+      root.style.setProperty('width', 'max-content', 'important');
+      let width = root.getBoundingClientRect().width;
+      if (body) {
+        const style = getComputedStyle(body);
+        width = Math.max(width, body.getBoundingClientRect().width + (parseFloat(style.marginLeft) || 0) + (parseFloat(style.marginRight) || 0));
+      }
+      if (old) root.style.setProperty('width', old, oldPriority);
+      else root.style.removeProperty('width');
+      const height = Math.max(root.scrollHeight, body ? body.scrollHeight : 0, root.getBoundingClientRect().height);
+      return [Math.ceil(width), Math.ceil(height)];
+    };
+    let last = '';
+    let scheduled = false;
+    const report = () => {
+      if (scheduled) return;
+      scheduled = true;
+      // Not requestAnimationFrame: the browser keeps the popup hidden until it is ready, and hidden pages get no frames.
+      setTimeout(() => {
+        scheduled = false;
+        const size = measure();
+        if (!size) return;
+        const key = size.join('x');
+        if (key === last) return;
+        last = key;
+        bridge.call('__ui.popupSize', JSON.stringify(size)).catch(() => {});
+      }, 0);
+    };
+    const observe = () => {
+      report();
+      if (typeof ResizeObserver === 'function') {
+        const observer = new ResizeObserver(report);
+        observer.observe(document.documentElement);
+        if (document.body) observer.observe(document.body);
+      }
+      if (typeof MutationObserver === 'function') new MutationObserver(report).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', observe, { once: true });
+    else observe();
+    // Chrome shows a popup once its page has loaded; the browser waits for this.
+    addEventListener('load', () => {
+      report();
+      setTimeout(() => bridge.call('__ui.popupReady', '[]').catch(() => {}), 0);
+    });
+    globalThis.close = () => { bridge.call('__ui.closePopup', '[]').catch(() => {}); };
+  }
+
   // The raw bridge is not for extension code. Keep our own reference only.
   try {
     delete globalThis.__cgxBridge;

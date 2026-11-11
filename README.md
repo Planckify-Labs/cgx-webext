@@ -10,9 +10,10 @@ provide.
 > **Status: early, but it runs.** In a Ladybird build with this integration, the "Add to Chrome" button of the Chrome
 > Web Store and the "Add to Firefox" button of addons.mozilla.org install extensions (see [docs/STORES.md](docs/STORES.md)),
 > and `--load-extension` loads them from files. It runs their background pages, extension pages and content scripts,
-> and passes messages and storage between them. Most real
-> extensions still only partly work, because the browser APIs they rely on (`tabs`, `windows`, `webRequest`, ...) are not
-> implemented yet. **To try it, see [docs/RUNNING.md](docs/RUNNING.md).**
+> passes messages and storage between them, and gives them the browser's tabs and windows, a toolbar button with badge
+> and popup, an extensions panel, context-menu items, keyboard shortcuts and `scripting.executeScript`. Network APIs
+> (`webRequest`, `declarativeNetRequest`), so ad blockers, are not implemented yet. **To try it, see
+> [docs/RUNNING.md](docs/RUNNING.md).** Progress against the full spec: [docs/specs/webextensions-full-api/tasks.md](docs/specs/webextensions-full-api/tasks.md).
 
 ## Why "WebExtensions" and not "translation"?
 
@@ -33,16 +34,18 @@ All of this is covered by automated tests (`scripts/check.sh`):
 | CRX3 signature check *structure* (the exact signed bytes and key/ID binding); the cryptographic verify is supplied by the browser | done |
 | API dispatch with existence, manifest-version, permission and status checks driven by a registry | done |
 | `storage.local/sync/session` (with real quotas), `i18n`, `alarms`, `permissions`, `runtime.getURL/getManifest`, lifecycle events | done |
+| `tabs`, `windows` from a browser snapshot: `Tab` objects trimmed by permission, `query`, events synthesized by diffing | done |
+| `action` / `browserAction` / `pageAction` (badge, title, icon, popup, per tab), `contextMenus` / `menus`, `commands` | done |
+| `scripting` (`executeScript`, `insertCSS`, registered content scripts) and Firefox `tabs.executeScript`, with `activeTab` | done |
 | `chrome.*` (callbacks, `lastError`, MV3 promises) and `browser.*` (promises) JavaScript shim, `onMessage` semantics | done |
 | C ABI (`webext.h`) | exercised by a real C program under ASan/UBSan/LSan |
 | CMake module | builds the Rust library and links it into a C++23 program, Debug and Release |
 | Ladybird patch | applies to a clean checkout at the pinned commit |
-| Ladybird C++ adapter | type-checks against Ladybird's headers; **not linked or run** |
+| Ladybird integration (toolbar, extensions panel, popups, injection across processes) | built and run in Ladybird |
 | **Coverage report** for the whole API surface and for any extension you point it at | done |
 
-What is **not** done is everything that lives inside a browser engine: serving `moz-extension://` pages, running a
-background page, injecting content scripts into an isolated JavaScript world, delivering messages between processes,
-`tabs`/`windows`/`action` UI, network blocking (`webRequest`, `declarativeNetRequest`), and the extension manager UI.
+What is **not** done yet: isolated JavaScript worlds for content scripts, service workers as real worker scopes, network
+blocking (`webRequest`, `declarativeNetRequest`), `webNavigation`, `cookies`, and an extensions manager page.
 [docs/INTEGRATION.md](docs/INTEGRATION.md) lists each of these with the exact library calls to use.
 
 ## How much is supported?
@@ -53,15 +56,20 @@ The registry in [`Data/api-support.json`](Data/api-support.json) lists every ext
 
 | | members | provided by the core | also counting what the host browser must implement |
 |---|---:|---:|---:|
-| Chrome | 399 | 12.8% | 33.6% |
-| Firefox | 417 | 11.5% | 31.2% |
+| Chrome | 399 | 38.6% | 40.6% |
+| Firefox | 417 | 37.9% | 39.6% |
+
+"Provided by the core" is what works today (tabs, windows, the toolbar, menus and scripting count here: Ladybird's side
+of them is done). The last column adds the few members the core passes to the browser unchanged (`cookies.*`,
+`runtime.onMessageExternal`, `tabs.onReplaced`), which Ladybird does not implement yet. The road to 100% is in
+[docs/specs/webextensions-full-api/roadmap.md](docs/specs/webextensions-full-api/roadmap.md).
 
 These numbers are deliberately unflattering. Large areas (`downloads`, `bookmarks`, `webRequest`, `declarativeNetRequest`,
-`webNavigation`, ports/`runtime.connect`) are not started.
+`webNavigation`, `cookies`) are not started.
 
 Real extensions (uBlock Origin, Dark Reader, Vimium, Stylus, Bitwarden) have been analysed too; see
-[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). All five are blocked today, mostly by ports (`runtime.connect`), `webRequest`,
-keyboard `commands` and `webNavigation`.
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Six extensions installed from the stores have been run in Ladybird; their popups
+work, and what each still lacks (mostly `webRequest`, `webNavigation` and isolated worlds) is listed there.
 
 To see how a specific extension fares:
 
