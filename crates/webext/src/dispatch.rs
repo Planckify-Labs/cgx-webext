@@ -50,6 +50,26 @@ pub const EMITTED_EVENTS: &[&str] = &[
     "contextMenus.onClicked",
     "commands.onCommand",
     "commands.onChanged",
+    // From the network stack and navigations (see `network`).
+    "declarativeNetRequest.onRuleMatchedDebug",
+    "webRequest.onBeforeRequest",
+    "webRequest.onBeforeSendHeaders",
+    "webRequest.onSendHeaders",
+    "webRequest.onHeadersReceived",
+    "webRequest.onAuthRequired",
+    "webRequest.onBeforeRedirect",
+    "webRequest.onResponseStarted",
+    "webRequest.onCompleted",
+    "webRequest.onErrorOccurred",
+    "webNavigation.onBeforeNavigate",
+    "webNavigation.onCommitted",
+    "webNavigation.onDOMContentLoaded",
+    "webNavigation.onCompleted",
+    "webNavigation.onErrorOccurred",
+    "webNavigation.onHistoryStateUpdated",
+    "webNavigation.onReferenceFragmentUpdated",
+    "webNavigation.onCreatedNavigationTarget",
+    "webNavigation.onTabReplaced",
 ];
 
 /// Everything the core keeps for one installed extension.
@@ -77,6 +97,10 @@ pub struct Extension {
     /// How many of `manifest.content_scripts` come from the manifest; the rest are `scripting.registerContentScripts`.
     pub static_content_scripts: usize,
     pub registered_scripts: Vec<crate::browser_api::RegisteredScript>,
+    /// `declarativeNetRequest` rules.
+    pub dnr: crate::dnr::ExtensionRules,
+    /// Install order: where two extensions disagree about a request, the one installed last wins.
+    pub seq: u64,
 }
 
 pub struct InstallOptions {
@@ -97,6 +121,8 @@ pub struct Dispatcher {
     pub(crate) browser: Rc<RefCell<crate::browser::BrowserState>>,
     /// Calls waiting for the host to run injected code; see `crate::browser_api`.
     pub(crate) next_serial: Rc<std::cell::Cell<u64>>,
+    /// `webRequest` listeners, requests waiting for them, and the frames of each tab; see `crate::network`.
+    pub(crate) network: Rc<RefCell<crate::network::NetworkState>>,
 }
 
 fn err(kind: ErrorKind, m: impl Into<String>) -> ApiError {
@@ -112,6 +138,7 @@ impl Dispatcher {
             bus: Rc::new(RefCell::new(Bus::new())),
             browser: Rc::new(RefCell::new(crate::browser::BrowserState::default())),
             next_serial: Rc::new(std::cell::Cell::new(0)),
+            network: Rc::new(RefCell::new(crate::network::NetworkState::default())),
         }
     }
 
@@ -155,7 +182,14 @@ impl Dispatcher {
         }
         let static_content_scripts = manifest.content_scripts.len();
         let registered_scripts = read_json("scripts").map(|v| crate::browser_api::RegisteredScript::list_from_json(&v)).unwrap_or_default();
+        let mut dnr = crate::dnr::ExtensionRules::from_manifest(&manifest.declarative_net_request_rulesets, |p| options.files.text(p));
+        if let Some(saved) = read_json("dnr") {
+            dnr.restore(&saved, |p| options.files.text(p));
+        }
+        self.next_serial.set(self.next_serial.get() + 1);
         let ext = Extension {
+            dnr,
+            seq: self.next_serial.get(),
             action,
             menus,
             commands,
@@ -173,8 +207,13 @@ impl Dispatcher {
             base_url: options.base_url,
             manifest,
         };
+        let has_rules = ext.dnr.has_rules();
         self.extensions.borrow_mut().insert(id.to_string(), ext);
         self.rebuild_content_scripts(id);
+        if has_rules {
+            // The browser has to start reporting requests.
+            self.host.dispatch_event(id, "__network.changed", vec![]);
+        }
     }
 
     pub fn uninstall(&self, id: &str) -> bool {
@@ -190,6 +229,10 @@ impl Dispatcher {
             self.host.call_browser(&call, Box::new(|_| {}));
         }
         let removed = removed.is_some();
+        self.network_extension_removed(id);
+        if removed {
+            self.host.dispatch_event(id, "__network.changed", vec![]);
+        }
         let effects = self.bus.borrow_mut().drop_extension(id);
         self.run_effects(effects);
         removed
@@ -211,6 +254,7 @@ impl Dispatcher {
     pub fn context_destroyed(&self, context_id: u64) {
         let effects = self.bus.borrow_mut().context_destroyed(context_id);
         self.run_effects(effects);
+        self.network_context_destroyed(context_id);
     }
 
     fn run_effects(&self, effects: Vec<Effect>) {
@@ -497,6 +541,9 @@ impl Dispatcher {
         if call.function.starts_with("__bus.") {
             return self.bus_internal(call, reply);
         }
+        if call.function.starts_with("__webRequest.") {
+            return self.web_request_internal(&call, reply);
+        }
         if call.function == "__contentScripts.unregister" {
             return reply(self.unregister_content_script(&call));
         }
@@ -562,6 +609,7 @@ impl Dispatcher {
             "runtime.connect" => self.connect(call, false),
             "tabs.connect" => self.connect(call, true),
             n if crate::browser_api::handles(n) => return self.browser_api(member, call, reply),
+            n if crate::network::handles(n) => return self.network_api(member, call, reply),
             n if n.starts_with("storage.") => self.storage(member, call),
             n if n.starts_with("alarms.") => self.alarms(member, call),
             other => Err(err(ErrorKind::Unhandled, format!("registry marks '{other}' as handled by the core, but no handler exists"))),
@@ -794,6 +842,7 @@ fn engine_of(ext: &Extension) -> crate::registry::Engine {
 pub(crate) fn permission_granted(p: &PermissionState, permission: &str) -> bool {
     match permission {
         "contextMenus" | "menus" => p.has_api("contextMenus") || p.has_api("menus"),
+        "declarativeNetRequest" => p.has_api("declarativeNetRequest") || p.has_api("declarativeNetRequestWithHostAccess"),
         other => p.has_api(other),
     }
 }
@@ -933,7 +982,7 @@ mod tests {
         let (d, _) = setup(M3);
         assert_eq!(kind(call(&d, "nope.nothing", vec![])), ErrorKind::UnknownApi);
         // Unsupported APIs report that before anything else, which is more useful than a permission error.
-        assert_eq!(kind(call(&d, "webRequest.onBeforeRequest", vec![])), ErrorKind::NotAvailable);
+        assert_eq!(kind(call(&d, "bookmarks.onCreated", vec![])), ErrorKind::NotAvailable);
         assert_eq!(kind(call(&d, "downloads.download", vec![])), ErrorKind::NotAvailable);
         let (no_perm, _) = setup(r#"{"manifest_version":3,"name":"x","version":"1"}"#);
         assert_eq!(kind(call(&no_perm, "alarms.create", vec![json!({"delayInMinutes": 1})])), ErrorKind::PermissionDenied);

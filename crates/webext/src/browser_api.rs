@@ -313,7 +313,7 @@ impl Dispatcher {
     }
 
     /// Calls a host primitive and shapes its answer with `then`.
-    fn host_call(
+    pub(crate) fn host_call(
         &self,
         call: &ApiCall,
         function: &str,
@@ -388,6 +388,8 @@ impl Dispatcher {
                 Ok(()) => json!({ "ok": true }),
                 Err(e) => json!({ "error": e }),
             },
+            "navigation" => self.navigation_event(args),
+            "networkInterest" => self.network_interest(),
             "grantActiveTab" => {
                 if let Some(tab) = tab {
                     self.grant_active_tab(id, tab);
@@ -415,9 +417,15 @@ impl Dispatcher {
                     Change::TabRemoved { tab_id, .. } => exts.values_mut().for_each(|e| {
                         e.permissions.revoke_active_tab(*tab_id);
                         e.action.forget_tab(*tab_id);
+                        e.dnr.forget_tab(*tab_id);
                     }),
                     _ => {}
                 }
+            }
+        }
+        for c in &changes {
+            if let Change::TabRemoved { tab_id, .. } = c {
+                self.network_tab_removed(*tab_id);
             }
         }
         let mut events = vec![];
@@ -523,7 +531,7 @@ impl Dispatcher {
                         "action": {
                             "kind": Self::action_kind(e),
                             "title": Self::action_title(e, tab),
-                            "badgeText": a.get(tab, |p| p.badge_text.clone()).unwrap_or_default(),
+                            "badgeText": Dispatcher::action_count_badge(e, tab).unwrap_or_else(|| a.get(tab, |p| p.badge_text.clone()).unwrap_or_default()),
                             "badgeBackgroundColor": a.get(tab, |p| p.badge_background),
                             "badgeTextColor": a.get(tab, |p| p.badge_text_color),
                             "popupUrl": Self::popup_url(e, tab),

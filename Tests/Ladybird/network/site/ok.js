@@ -1,0 +1,1 @@
+window.okLoaded = 1;

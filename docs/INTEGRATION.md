@@ -101,10 +101,27 @@ and `ExtensionBridge::run_injection` in Ladybird.
 `LibWebView/WebContentPage.cpp` (frames and injection across processes), `LibWebView/ViewImplementation.cpp` (extension
 items in page context menus), `LibWeb/Internals/ExtensionBridge.cpp` (running injected code).
 
-### 7. Network APIs (`planned`)
-`declarativeNetRequest` (what MV3 content blockers use) and `webRequest`, including blocking handlers (what uBlock Origin
-MV2 uses). Both need hooks in the network stack (`Services/RequestServer`). Ladybird's content blocker
-(`LibWeb/ContentBlocker`, built on the `adblock` crate) is a natural engine for translating DNR rules. Not started here.
+### 7. Network APIs
+
+`declarativeNetRequest`, `webRequest` and `webNavigation` are implemented by the core (`dnr.rs`, `network.rs`). The browser:
+
+1. **Asks which stages matter.** `webext_host_event("networkInterest")` returns `{any, stages, requestBody, navigation}`;
+   the core sends the event `__network.changed` (through `dispatch_event`; not for extension contexts) when the answer may
+   have changed. Report only those stages, so that a browser without interested extensions pays nothing.
+2. **Reports each request** with `webext_network_event(stage, details, on_reply)` and holds it until `on_reply` runs: at
+   once for rules, later when a blocking `webRequest` listener must answer. The answer is `{}` (go on), `{cancel}`,
+   `{redirectUrl}`, `{requestHeaders}` (the whole new list), `{responseHeaders}` or `{authCredentials}`. The stages and
+   their details are in `webext.h` and at the top of `network.rs`. `tabId` and `frameId` must be the ids used everywhere
+   else (frame 0 is the top frame), decided by the browser process, not by what a renderer claims.
+3. **Reports navigations** with `webext_host_event("navigation", {event, tabId, frameId, parentFrameId, url, ...})`.
+
+*Ladybird:* the renderer asks at `beforeRequest`, `beforeSendHeaders` and `headersReceived` around the HTTP network fetch
+(`http_network_fetch_with_extensions` in `LibWeb/Fetch/Fetching/Fetching.cpp`, `LibWeb/Loader/ExtensionNetwork`), through
+`did_report_extension_network_stage` to the browser process, which adds the tab and frame
+(`WebContentPage::did_report_extension_network_stage`) and calls the core. A redirect is an internal 307 response, so the
+usual redirect handling follows it; a redirect to an extension file or a `data:` URL is answered in place. Navigation steps
+come from the document's life in the renderer (`Document::make_active`, the parser's end, `LocalNavigable`). Not hooked
+yet: worker requests, WebSockets, authentication challenges, the response body (`filterResponseData`).
 
 ### 8. User interface
 Toolbar buttons, the extensions panel and popups are built on `uiState` (section 6). Popup pages get `isPopup` in their init

@@ -1,0 +1,9 @@
+[
+ {"id": 1, "action": {"type": "block"}, "condition": {"urlFilter": "/ads/"}},
+ {"id": 2, "action": {"type": "redirect", "redirect": {"transform": {"path": "/redirected.js"}}}, "condition": {"urlFilter": "/redirect-me.js"}},
+ {"id": 3, "action": {"type": "redirect", "redirect": {"extensionPath": "/surrogate.js"}}, "condition": {"urlFilter": "/to-extension.js"}},
+ {"id": 4, "action": {"type": "modifyHeaders",
+   "requestHeaders": [{"header": "X-Test", "operation": "remove"}, {"header": "X-Added", "operation": "set", "value": "by-rule"}],
+   "responseHeaders": [{"header": "X-Server", "operation": "remove"}, {"header": "X-Replaced", "operation": "set", "value": "yes"}]},
+  "condition": {"urlFilter": "/api.json", "resourceTypes": ["xmlhttprequest"]}}
+]

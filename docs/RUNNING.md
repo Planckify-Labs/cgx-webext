@@ -143,8 +143,10 @@ These work, tested in this build:
 
 These do not work yet:
 
-- `webRequest`, `declarativeNetRequest`, `webNavigation`, `cookies`: ad blockers such as uBlock Origin open their popup but
-  block nothing ("0 blocked").
+- `cookies`, and the browser-data APIs (`downloads`, `bookmarks`, `history`, ...).
+- Requests made by workers and WebSocket connections are not shown to extensions yet, so an ad blocker does not filter
+  them. Requests of pages and frames are: uBlock Origin and uBlock Origin Lite block ads (see
+  [COMPATIBILITY.md](COMPATIBILITY.md)); `scripts/ladybird-network-test.sh` checks the network APIs in your build.
 - Content scripts share the page's JavaScript world (no isolated worlds). Extensions whose content scripts `import()`
   modules that use `chrome.*`, such as Ambient light for YouTube, do not work, and a hostile page can tamper with content
   scripts. Try extensions on sites you trust.

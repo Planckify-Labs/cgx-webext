@@ -41,6 +41,35 @@ differences (argument shapes, `Tab` fields, error messages) live in one place.
 - [x] Req 18.1 Chrome-style extensions get `chrome` only; Firefox-style get `browser` too (pages and content scripts).
 - [x] Req 2.7 Unimplemented APIs name themselves: "`cookies.get` is not implemented yet in Ladybird".
 
+## Done: network APIs (Requirement 10)
+
+- [x] Req 10.1 `declarativeNetRequest`: every function and `onRuleMatchedDebug`. The rule engine is in the core
+      (`crates/webext/src/dnr.rs`): static rulesets from the manifest, dynamic and session rules, all actions (`block`,
+      `allow`, `allowAllRequests`, `upgradeScheme`, `redirect` with `url`/`extensionPath`/`transform`/`regexSubstitution`,
+      `modifyHeaders`) and conditions, priorities within and across extensions, Chrome's limits, `getMatchedRules` and the
+      badge count. Dynamic rules, enabled rulesets and disabled static rules survive a restart.
+- [x] Req 10.2–10.3 `webRequest`: the events with URL/type/tab filters and `extraInfoSpec`; blocking listeners (cancel,
+      redirect, changed request and response headers, promises and `asyncBlocking`) for Firefox extensions and Chrome MV2.
+      The listener's filter lives in the core, so a context is only woken for requests it asked for.
+- [x] Req 10.4 `webNavigation`: `onBeforeNavigate`, `onCommitted`, `onDOMContentLoaded`, `onCompleted`,
+      `onHistoryStateUpdated`, `onReferenceFragmentUpdated` with URL filters, `getFrame`, `getAllFrames`; frame ids are the
+      ones `tabs` and `scripting` use.
+- [x] Req 10.5 Matching 100,000 rules takes well under 1 ms per request (a test in `dnr.rs` holds it there).
+- [x] Ladybird: fetching asks the browser process at `beforeRequest`, `beforeSendHeaders` and `headersReceived`, only for
+      the stages an extension cares about (`LibWeb/Loader/ExtensionNetwork`, `http_network_fetch_with_extensions` in
+      `Fetching.cpp`). An extension's redirect is an internal 307; a redirect to an extension file or a `data:` URL is
+      answered in place. `scripts/ladybird-network-test.sh` checks all of it in a real build.
+
+Not done in this area: `webRequest.filterResponseData`; `onAuthRequired`, `webNavigation.onErrorOccurred` and
+`onCreatedNavigationTarget` exist but Ladybird never fires them; requests made by workers and WebSocket connections are not
+reported; `onCompleted` fires when the headers arrive; `getSecurityInfo` has no certificate details (Ladybird reports none).
+Req 10.6: uBlock Origin 1.76 (Firefox) and uBlock Origin Lite (Chrome) were run headless against a page that loads Google's
+ad, tag-manager and publisher-tag scripts: both cancel or replace all three and leave an unrelated script alone. uBlock
+Origin found two bugs, fixed: `webRequest` filters naming the extension's own files (`moz-extension://…/*`) were refused,
+and reporting a navigation crashed the renderer for documents without an id (YouTube, `about:welcome`). Open: uBlock
+Origin holds all requests until its lists are ready, which takes about 25 seconds on a first run in Ladybird (script
+speed, not the hook: requests are answered in under 60 ms once it is ready).
+
 ## Fixed after running real extensions
 
 - Unimplemented members and empty namespaces are `undefined`, and each extension sees only its browser's members, so
@@ -72,16 +101,17 @@ See [../../COMPATIBILITY.md](../../COMPATIBILITY.md) for the six extensions run 
 
 The full plan to 100%, by kind of work, is in [roadmap.md](roadmap.md). In the order the reference extensions need them:
 
-1. Req 10 `declarativeNetRequest` and `webRequest` in RequestServer (uBlock Origin, every ad blocker).
+1. Rest of Req 10: `filterResponseData`; requests of workers and WebSockets; `onAuthRequired`; failed navigations; uBlock
+   Origin's cosmetic filtering and popup counts, checked in a window.
 2. Req 2.5 isolated worlds for content scripts (security, and pages that shadow built-ins).
 3. Req 2.3 service workers as real worker scopes; Req 13.5 idle shutdown.
-4. Req 10.4 `webNavigation` (snapshot already has the frames; events need navigation hooks).
-5. Req 11 `cookies` against Ladybird's cookie jar; `browsingData`.
-6. Req 12 `about:extensions` (enable/disable, permissions, errors, load unpacked); Req 15.3 permission prompt.
-7. Req 14: `notifications`, `downloads`, `history`, `bookmarks`, `sessions`, `idle`, `i18n.detectLanguage`, and the rest.
-8. Req 9.3 shortcut editor UI; Req 6.2 `openPopup` without a pinned button anchors to the puzzle button (done) but
+4. Req 11 `cookies` against Ladybird's cookie jar; `browsingData`.
+5. Req 12 `about:extensions` (enable/disable, permissions, errors, load unpacked); Req 15.3 permission prompt.
+6. Req 14: `notifications`, `downloads`, `history`, `bookmarks`, `sessions`, `idle`, `i18n.detectLanguage`, and the rest.
+7. Req 9.3 shortcut editor UI; Req 6.2 `openPopup` without a pinned button anchors to the puzzle button (done) but
    does not yet focus a minimized window.
-9. Req 1 reference corpus and acceptance scenarios; Req 16 headless Ladybird tests for each host primitive.
+8. Req 1 reference corpus and acceptance scenarios; Req 16 headless Ladybird tests for each host primitive (the network
+   test is the first).
 
 ## Known limits of what is done
 

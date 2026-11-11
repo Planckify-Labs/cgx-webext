@@ -658,6 +658,36 @@ pub unsafe extern "C" fn webext_dispatch(h: *mut WebExtHandle, call_json: WebExt
     }
 }
 
+/// One stage of a network request (see `webext::network`). `on_reply` receives the instruction for the browser as JSON
+/// (`{}` to go on, or `cancel`, `redirectUrl`, `requestHeaders`, `responseHeaders`, `authCredentials`): at once, or
+/// after the extensions' blocking `webRequest` listeners have answered.
+///
+/// # Safety
+/// `h` must be live; `user` must stay valid until `on_reply` runs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn webext_network_event(
+    h: *mut WebExtHandle,
+    stage: WebExtStr,
+    details_json: WebExtStr,
+    on_reply: Option<WebExtReplyFn>,
+    user: *mut c_void,
+) {
+    let Some(on_reply) = on_reply else { return };
+    let respond = move |r: ApiResult| match r {
+        Ok(v) => on_reply(user, true, view(&v.to_string())),
+        Err(e) => on_reply(user, false, view(&e.to_json().to_string())),
+    };
+    let (Some(handle), Some(stage), Some(text)) = (handle(h), str_of(stage), str_of(details_json)) else {
+        return respond(Err(ApiError::invalid("bad arguments")));
+    };
+    let details = match serde_json::from_str::<Value>(text) {
+        Ok(v) => v,
+        Err(e) => return respond(Err(ApiError::invalid(e.to_string()))),
+    };
+    let dispatcher = handle.dispatcher.clone();
+    let _ = catch_unwind(AssertUnwindSafe(|| dispatcher.network_event(stage, &details, Box::new(respond))));
+}
+
 /// Completes a `call_browser` request. `json` is the result value when `ok`, otherwise an error message string (plain
 /// text, not JSON).
 ///

@@ -11,8 +11,8 @@ provide.
 > Web Store and the "Add to Firefox" button of addons.mozilla.org install extensions (see [docs/STORES.md](docs/STORES.md)),
 > and `--load-extension` loads them from files. It runs their background pages, extension pages and content scripts,
 > passes messages and storage between them, and gives them the browser's tabs and windows, a toolbar button with badge
-> and popup, an extensions panel, context-menu items, keyboard shortcuts and `scripting.executeScript`. Network APIs
-> (`webRequest`, `declarativeNetRequest`), so ad blockers, are not implemented yet. **To try it, see
+> and popup, an extensions panel, context-menu items, keyboard shortcuts and `scripting.executeScript`, and lets them block, redirect and change network
+> requests (`declarativeNetRequest`, `webRequest`) and follow navigations (`webNavigation`). **To try it, see
 > [docs/RUNNING.md](docs/RUNNING.md).** Progress against the full spec: [docs/specs/webextensions-full-api/tasks.md](docs/specs/webextensions-full-api/tasks.md).
 
 ## Why "WebExtensions" and not "translation"?
@@ -37,6 +37,7 @@ All of this is covered by automated tests (`scripts/check.sh`):
 | `tabs`, `windows` from a browser snapshot: `Tab` objects trimmed by permission, `query`, events synthesized by diffing | done |
 | `action` / `browserAction` / `pageAction` (badge, title, icon, popup, per tab), `contextMenus` / `menus`, `commands` | done |
 | `scripting` (`executeScript`, `insertCSS`, registered content scripts) and Firefox `tabs.executeScript`, with `activeTab` | done |
+| `declarativeNetRequest` (static, dynamic and session rules; 100,000 rules match in under 1 ms), `webRequest` with blocking listeners, `webNavigation` | done |
 | `chrome.*` (callbacks, `lastError`, MV3 promises) and `browser.*` (promises) JavaScript shim, `onMessage` semantics | done |
 | C ABI (`webext.h`) | exercised by a real C program under ASan/UBSan/LSan |
 | CMake module | builds the Rust library and links it into a C++23 program, Debug and Release |
@@ -44,8 +45,8 @@ All of this is covered by automated tests (`scripts/check.sh`):
 | Ladybird integration (toolbar, extensions panel, popups, injection across processes) | built and run in Ladybird |
 | **Coverage report** for the whole API surface and for any extension you point it at | done |
 
-What is **not** done yet: isolated JavaScript worlds for content scripts, service workers as real worker scopes, network
-blocking (`webRequest`, `declarativeNetRequest`), `webNavigation`, `cookies`, and an extensions manager page.
+What is **not** done yet: isolated JavaScript worlds for content scripts, service workers as real worker scopes,
+`cookies`, the browser-data APIs (`downloads`, `bookmarks`, `history`, ...) and an extensions manager page.
 [docs/INTEGRATION.md](docs/INTEGRATION.md) lists each of these with the exact library calls to use.
 
 ## How much is supported?
@@ -56,20 +57,20 @@ The registry in [`Data/api-support.json`](Data/api-support.json) lists every ext
 
 | | members | provided by the core | also counting what the host browser must implement |
 |---|---:|---:|---:|
-| Chrome | 399 | 38.6% | 40.6% |
-| Firefox | 417 | 37.9% | 39.6% |
+| Chrome | 399 | 47.1% | 49.1% |
+| Firefox | 417 | 45.6% | 47.2% |
 
 "Provided by the core" is what works today (tabs, windows, the toolbar, menus and scripting count here: Ladybird's side
 of them is done). The last column adds the few members the core passes to the browser unchanged (`cookies.*`,
 `runtime.onMessageExternal`, `tabs.onReplaced`), which Ladybird does not implement yet. The road to 100% is in
 [docs/specs/webextensions-full-api/roadmap.md](docs/specs/webextensions-full-api/roadmap.md).
 
-These numbers are deliberately unflattering. Large areas (`downloads`, `bookmarks`, `webRequest`, `declarativeNetRequest`,
-`webNavigation`, `cookies`) are not started.
+These numbers are deliberately unflattering. Large areas (`downloads`, `bookmarks`, `history`, `cookies`, `notifications`)
+are not started.
 
 Real extensions (uBlock Origin, Dark Reader, Vimium, Stylus, Bitwarden) have been analysed too; see
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Six extensions installed from the stores have been run in Ladybird; their popups
-work, and what each still lacks (mostly `webRequest`, `webNavigation` and isolated worlds) is listed there.
+work, and what each still lacks is listed there (they have not been run again since the network APIs landed).
 
 To see how a specific extension fares:
 
@@ -100,6 +101,7 @@ internals. Treat it as a good estimate, not a proof.
 
 ```sh
 scripts/check.sh                              # fmt, clippy, all tests, ASan run, coverage-doc check
+scripts/ladybird-network-test.sh              # the network APIs in a real Ladybird build (needs that build)
 cargo run -p webext-cli -- registry           # API coverage tables
 cargo run -p webext-cli -- inspect <path>...  # a .crx/.xpi/.zip or an unpacked directory
 ```

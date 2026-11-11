@@ -254,3 +254,63 @@ test('setIcon sends ImageData as base64 RGBA, and executeScript sends func as so
   assert.equal(calls[2].args[0].func, undefined);
   assert.deepEqual(calls[2].args[0].args, [1, 2]);
 });
+
+test('webRequest listeners register with the core and blocking ones answer', async () => {
+  const { api, calls } = make({ mv: 2 });
+  const seen = [];
+  const blocker = (details) => { seen.push(details.url); return { cancel: details.url.includes('ads') }; };
+  api.chrome.webRequest.onBeforeRequest.addListener(blocker, { urls: ['<all_urls>'] }, ['blocking']);
+  assert.deepEqual(calls[0], { name: '__webRequest.addListener', args: ['webRequest.onBeforeRequest', 1, { urls: ['<all_urls>'] }, ['blocking']] });
+  assert.ok(api.browser.webRequest.onBeforeRequest.hasListener(blocker), 'browser.* and chrome.* share the event');
+  assert.throws(() => api.chrome.webRequest.onBeforeRequest.addListener(() => {}), /urls/);
+
+  api.handleHostMessage({ type: 'webRequest', event: 'webRequest.onBeforeRequest', listenerId: 1, replyTo: 5, details: { url: 'https://ads.test/' } });
+  await Promise.resolve();
+  assert.deepEqual(calls.at(-1), { name: '__webRequest.reply', args: [5, 1, { cancel: true }] });
+
+  // Firefox style: a promise.
+  api.browser.webRequest.onHeadersReceived.addListener(async () => ({ responseHeaders: [] }), { urls: ['<all_urls>'] }, ['blocking']);
+  api.handleHostMessage({ type: 'webRequest', event: 'webRequest.onHeadersReceived', listenerId: 2, replyTo: 6, details: { url: 'https://a.test/' } });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(calls.at(-1), { name: '__webRequest.reply', args: [6, 2, { responseHeaders: [] }] });
+
+  // Chrome's asyncBlocking: the answer goes to a callback, later.
+  let later;
+  api.chrome.webRequest.onAuthRequired.addListener((details, done) => { later = done; }, { urls: ['<all_urls>'] }, ['asyncBlocking']);
+  const before = calls.length;
+  api.handleHostMessage({ type: 'webRequest', event: 'webRequest.onAuthRequired', listenerId: 3, replyTo: 7, details: { url: 'https://a.test/' } });
+  assert.equal(calls.length, before, 'nothing is answered until the callback runs');
+  later({ authCredentials: { username: 'u', password: 'p' } });
+  assert.deepEqual(calls.at(-1).args, [7, 3, { authCredentials: { username: 'u', password: 'p' } }]);
+
+  // Observers are not asked for an answer; a listener that was removed answers "no opinion".
+  const count = calls.length;
+  api.handleHostMessage({ type: 'webRequest', event: 'webRequest.onBeforeRequest', listenerId: 1, replyTo: null, details: { url: 'https://b.test/' } });
+  assert.equal(calls.length, count);
+  assert.deepEqual(seen, ['https://ads.test/', 'https://b.test/']);
+  api.chrome.webRequest.onBeforeRequest.removeListener(blocker);
+  assert.deepEqual(calls.at(-1), { name: '__webRequest.removeListener', args: ['webRequest.onBeforeRequest', 1] });
+  api.handleHostMessage({ type: 'webRequest', event: 'webRequest.onBeforeRequest', listenerId: 1, replyTo: 8, details: { url: 'https://c.test/' } });
+  assert.deepEqual(calls.at(-1), { name: '__webRequest.reply', args: [8, 1, null] });
+});
+
+test('webNavigation listeners can filter by URL', () => {
+  const { api } = make();
+  const all = [];
+  const filtered = [];
+  api.chrome.webNavigation.onCompleted.addListener((d) => all.push(d.url));
+  api.chrome.webNavigation.onCompleted.addListener((d) => filtered.push(d.url), {
+    url: [{ hostSuffix: '.example.com', pathPrefix: '/docs' }, { urlMatches: '^https://exact\\.test/$' }, { schemes: ['ftp'], ports: [[2000, 3000]] }],
+  });
+  const urls = ['https://www.example.com/docs/a', 'https://www.example.com/other', 'https://example.com/docs', 'https://exact.test/',
+    'https://exact.test/x', 'ftp://files.test:2121/', 'ftp://files.test/'];
+  for (const url of urls) api.dispatchEvent('webNavigation.onCompleted', [{ url }]);
+  assert.deepEqual(all, urls);
+  assert.deepEqual(filtered, ['https://www.example.com/docs/a', 'https://example.com/docs', 'https://exact.test/', 'ftp://files.test:2121/']);
+});
+
+test('declarativeNetRequest constants are there', () => {
+  const { api } = make();
+  assert.equal(api.chrome.declarativeNetRequest.MAX_NUMBER_OF_DYNAMIC_RULES, 30000);
+  assert.equal(api.browser.declarativeNetRequest.SESSION_RULESET_ID, '_session');
+});

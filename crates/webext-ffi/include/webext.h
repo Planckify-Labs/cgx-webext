@@ -151,8 +151,29 @@ void webext_notify_startup(WebExtHandle* h, WebExtStr id);
  *   "command"            {extensionId,name,tabId}         -> like actionClicked for _execute_* commands
  *   "setShortcut"        {extensionId,name,shortcut}      -> {"ok":true} or {"error":...}
  *   "grantActiveTab"     {extensionId,tabId}
+ *   "networkInterest"    {}                               -> {any, stages:[...], requestBody, navigation}: the stages of a request
+ *                                                            somebody cares about; the core sends the event
+ *                                                            "__network.changed" (through dispatch_event) when it changes
+ *   "navigation"         {event,tabId,frameId,parentFrameId,url,timeStamp?,documentId?,transitionType?,
+ *                         transitionQualifiers?,error?,sourceTabId?,sourceFrameId?,replacedTabId?}
+ *                         event: beforeNavigate|committed|domContentLoaded|completed|errorOccurred|historyStateUpdated|
+ *                         referenceFragmentUpdated|createdNavigationTarget|tabReplaced. Frame 0 is the tab's top frame.
  * Returns JSON; release it with webext_string_free. */
 WebExtString webext_host_event(WebExtHandle* h, WebExtStr name, WebExtStr args_json);
+
+/*
+ * One stage of a network request, for declarativeNetRequest and webRequest. Report the stages webext_host_event
+ * ("networkInterest") lists and hold the request until on_reply runs (at once, unless a blocking listener must answer).
+ *   stage: beforeRequest|beforeSendHeaders|sendHeaders|headersReceived|authRequired|beforeRedirect|responseStarted|
+ *          completed|errorOccurred
+ *   details: {requestId,url,method,type,tabId,frameId,parentFrameId,initiator?,documentUrl?,timeStamp,
+ *             requestHeaders?:[{name,value}],responseHeaders?,statusCode?,statusLine?,ip?,fromCache?,redirectUrl?,error?,
+ *             requestBody?,securityInfo?,scheme?,realm?,challenger?,isProxy?}
+ *   type: main_frame|sub_frame|stylesheet|script|image|font|object|xmlhttprequest|ping|csp_report|media|websocket|other
+ * The answer is {} to go on, or {"cancel":true}, {"redirectUrl":...}, {"requestHeaders":[...]} (the complete new list),
+ * {"responseHeaders":[...]}, {"authCredentials":{username,password}}.
+ */
+void webext_network_event(WebExtHandle* h, WebExtStr stage, WebExtStr details_json, WebExtReplyFn on_reply, void* user);
 
 /* ---- Extension stores: the Chrome Web Store and addons.mozilla.org (see docs/STORES.md) ----
  * webext_content_script_programs also returns the store program, under the extension id "__store__", for documents on a

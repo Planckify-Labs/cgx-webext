@@ -267,10 +267,10 @@ pub fn manifest_features(m: &Manifest) -> Vec<FeatureUse> {
         add("web_accessible_resources", Status::Delegated, "host must enforce access to extension resources from web pages");
     }
     if !m.declarative_net_request_rulesets.is_empty() {
-        add("declarative_net_request rulesets", Status::Planned, "network blocking is not implemented yet");
+        add("declarative_net_request rulesets", Status::Delegated, "the core matches the rules; the host reports each request to it");
     }
     if m.uses_permission("webRequestBlocking") {
-        add("blocking webRequest", Status::Planned, "needs request interception in the network stack");
+        add("blocking webRequest", Status::Delegated, "the host holds each request until the core answers");
     }
     if !m.commands.is_empty() {
         add("keyboard commands", Status::Delegated, "the core keeps the shortcuts; the host registers them");
@@ -499,8 +499,8 @@ mod tests {
     fn manifest_features_affect_verdict() {
         let m = r#"{"manifest_version":3,"name":"x","version":"1","declarative_net_request":{"rule_resources":[{"id":"r","enabled":true,"path":"r.json"}]},"permissions":["declarativeNetRequest"],"background":{"service_worker":"s.js"}}"#;
         let r = report(m, "");
-        assert_eq!(r.verdict, Verdict::Blocked);
-        assert!(r.blockers.contains(&"declarative_net_request rulesets".to_string()));
+        assert_eq!(r.verdict, Verdict::NeedsHost);
+        assert!(r.features.iter().any(|f| f.name == "declarative_net_request rulesets" && f.status == Status::Delegated));
         assert!(r.features.iter().any(|f| f.name == "background service worker"));
     }
 

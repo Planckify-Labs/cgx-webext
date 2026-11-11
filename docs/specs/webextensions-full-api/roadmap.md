@@ -1,7 +1,7 @@
 # Roadmap to 100%: every Chrome and Firefox extension API in Ladybird
 
-State in November 2026 (`docs/COVERAGE.md`): **Chrome 38.6%** of 399 members, **Firefox 37.9%** of 417. Across both
-browsers the registry has 503 members: 162 done, 8 delegated, 333 planned.
+State in November 2026 (`docs/COVERAGE.md`): **Chrome 47.1%** of 399 members, **Firefox 45.6%** of 417. Phase 2 (network)
+is done except `proxy`, `dns` and `webRequest.filterResponseData`.
 
 ## What the coverage columns mean
 
@@ -34,6 +34,10 @@ These are not API members but block extensions that already "have" their APIs.
 | Dark Reader's dark-theme detector misfires on Ladybird (web-platform difference, not yet identified) | E | Dark Reader |
 
 ## Phase 2: network (ad blockers and anything that watches navigation)
+
+Done: `webNavigation`, `webRequest` and `declarativeNetRequest` (see tasks.md for the limits). Ladybird's hook is in the
+renderer's fetch code, not in RequestServer: the renderer already has the request's frame, type and initiator, and holding
+a fetch there needs no new machinery. What remains from the table: `filterResponseData`, `proxy`, `dns`.
 
 | Namespace | Members | Kind | Unblocks |
 |---|---:|---|---|
@@ -99,7 +103,6 @@ These are not API members but block extensions that already "have" their APIs.
 ## Order recommended for the extensions in use now
 
 1. Isolated worlds (Ambient Light, safety of everything).
-2. `webNavigation` (uBlock Origin, SponsorBlock, AnyDoc).
-3. `webRequest` blocking and `declarativeNetRequest` (uBlock Origin blocking ads).
+2. ~~`webNavigation`~~ and 3. ~~`webRequest` blocking and `declarativeNetRequest`~~: done; run uBlock Origin next.
 4. `cookies`, `i18n.detectLanguage` (AnyDoc).
 5. `bookmarks`, `history`, `downloads`, `sessions`, `tts` (Surfingkeys).

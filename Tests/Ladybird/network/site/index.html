@@ -1,0 +1,15 @@
+<!doctype html><title>network test</title>
+<script src="/ads/ad.js"></script>
+<script src="/ok.js"></script>
+<script src="/redirect-me.js"></script>
+<script src="/to-extension.js"></script>
+<img src="/ads/banner.png">
+<iframe src="/frame.html"></iframe>
+<script>
+window.results = { ad: typeof adLoaded, ok: typeof okLoaded, redirected: window.redirected, surrogate: window.surrogate };
+fetch('/api.json', { headers: { 'X-Test': 'page' } }).then(async (r) => {
+  window.results.cookieHeader = r.headers.get('x-server');
+  window.results.replaced = r.headers.get('x-replaced');
+  await fetch('/report?' + encodeURIComponent(JSON.stringify(window.results)));
+});
+</script>

@@ -50,6 +50,21 @@
     'storage.sync.MAX_WRITE_OPERATIONS_PER_MINUTE': 120,
     'storage.local.QUOTA_BYTES': 10485760,
     'storage.session.QUOTA_BYTES': 10485760,
+    // The limits the core enforces (crates/webext/src/dnr.rs).
+    'declarativeNetRequest.MAX_NUMBER_OF_DYNAMIC_RULES': 30000,
+    'declarativeNetRequest.MAX_NUMBER_OF_UNSAFE_DYNAMIC_RULES': 5000,
+    'declarativeNetRequest.MAX_NUMBER_OF_SESSION_RULES': 5000,
+    'declarativeNetRequest.MAX_NUMBER_OF_UNSAFE_SESSION_RULES': 5000,
+    'declarativeNetRequest.MAX_NUMBER_OF_REGEX_RULES': 1000,
+    'declarativeNetRequest.MAX_NUMBER_OF_STATIC_RULESETS': 100,
+    'declarativeNetRequest.MAX_NUMBER_OF_ENABLED_STATIC_RULESETS': 50,
+    'declarativeNetRequest.MAX_NUMBER_OF_DISABLED_STATIC_RULES': 5000,
+    'declarativeNetRequest.GUARANTEED_MINIMUM_STATIC_RULES': 30000,
+    'declarativeNetRequest.GETMATCHEDRULES_QUOTA_INTERVAL': 10,
+    'declarativeNetRequest.MAX_GETMATCHEDRULES_CALLS_PER_INTERVAL': 20,
+    'declarativeNetRequest.DYNAMIC_RULESET_ID': '_dynamic',
+    'declarativeNetRequest.SESSION_RULESET_ID': '_session',
+    'webRequest.MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES': 20,
   };
 
   // sendMessage results arrive as { response } when a listener answered and {} when listeners existed but none did, so that
@@ -122,17 +137,106 @@
 
   function createEvent(ctx, name) {
     const listeners = new Set();
+    // Events that take a filter as addListener's second argument (webNavigation): callback -> filter.
+    const filters = new Map();
     const event = {
-      addListener(cb) {
+      addListener(cb, filter) {
         if (typeof cb !== 'function') throw new TypeError(`${name}.addListener: listener must be a function`);
         listeners.add(cb);
+        if (filter && typeof filter === 'object') filters.set(cb, filter);
       },
-      removeListener(cb) { listeners.delete(cb); },
+      removeListener(cb) { listeners.delete(cb); filters.delete(cb); },
       hasListener(cb) { return listeners.has(cb); },
       hasListeners() { return listeners.size > 0; },
     };
-    ctx.events.set(name, { listeners });
+    ctx.events.set(name, { listeners, filters });
     return event;
+  }
+
+  /**
+   * webRequest events take a filter and options, and blocking listeners answer. The core keeps the filters (it sees every
+   * request and must not wake contexts for nothing), so each listener is registered there under a number.
+   */
+  function createWebRequestEvent(ctx, name, log) {
+    const entries = [];
+    return {
+      addListener(cb, filter, extraInfoSpec) {
+        if (typeof cb !== 'function') throw new TypeError(`${name}.addListener: listener must be a function`);
+        if (!filter || !Array.isArray(filter.urls)) throw new TypeError(`${name}.addListener: the filter needs a 'urls' list`);
+        const specs = Array.isArray(extraInfoSpec) ? extraInfoSpec.slice() : [];
+        const id = ++ctx.listenerSeq;
+        const entry = { cb, id, async: specs.includes('asyncBlocking') };
+        entries.push(entry);
+        ctx.requestListeners.set(id, entry);
+        ctx.bridge.call('__webRequest.addListener', [name, id, filter, specs]).catch((error) => {
+          entries.splice(entries.indexOf(entry), 1);
+          ctx.requestListeners.delete(id);
+          log.error(`${name}.addListener: ${error && error.message ? error.message : error}`);
+        });
+      },
+      removeListener(cb) {
+        const i = entries.findIndex((e) => e.cb === cb);
+        if (i < 0) return;
+        const [entry] = entries.splice(i, 1);
+        ctx.requestListeners.delete(entry.id);
+        ctx.bridge.call('__webRequest.removeListener', [name, entry.id]).catch(() => {});
+      },
+      hasListener(cb) { return entries.some((e) => e.cb === cb); },
+      hasListeners() { return entries.length > 0; },
+    };
+  }
+
+  /** events.UrlFilter, as webNavigation's listener filters use it. */
+  function urlFilterMatches(filter, href) {
+    let url;
+    try { url = new URL(href); } catch (e) { return false; }
+    const host = url.hostname;
+    const dotted = '.' + host;
+    const query = url.search.replace(/^\?/, '');
+    const noFragment = href.split('#')[0];
+    const checks = {
+      hostContains: (v) => dotted.includes(v),
+      hostEquals: (v) => host === v,
+      hostPrefix: (v) => host.startsWith(v),
+      hostSuffix: (v) => dotted.endsWith(v) || host.endsWith(v),
+      pathContains: (v) => url.pathname.includes(v),
+      pathEquals: (v) => url.pathname === v,
+      pathPrefix: (v) => url.pathname.startsWith(v),
+      pathSuffix: (v) => url.pathname.endsWith(v),
+      queryContains: (v) => query.includes(v),
+      queryEquals: (v) => query === v,
+      queryPrefix: (v) => query.startsWith(v),
+      querySuffix: (v) => query.endsWith(v),
+      urlContains: (v) => noFragment.includes(v),
+      urlEquals: (v) => noFragment === v,
+      urlPrefix: (v) => noFragment.startsWith(v),
+      urlSuffix: (v) => noFragment.endsWith(v),
+      urlMatches: (v) => new RegExp(v).test(noFragment),
+      originAndPathMatches: (v) => new RegExp(v).test(url.origin + url.pathname),
+      schemes: (v) => Array.isArray(v) && v.includes(url.protocol.replace(/:$/, '')),
+      ports: (v) => {
+        const defaults = { 'http:': 80, 'https:': 443, 'ws:': 80, 'wss:': 443, 'ftp:': 21 };
+        const port = url.port ? Number(url.port) : defaults[url.protocol];
+        return Array.isArray(v) && v.some((p) => (Array.isArray(p) ? port >= p[0] && port <= p[1] : port === p));
+      },
+    };
+    for (const [key, value] of Object.entries(filter || {})) {
+      const check = checks[key];
+      try {
+        if (check && !check(value)) return false;
+      } catch (e) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Whether an event with these arguments passes the filter a listener gave to addListener. */
+  function passesFilter(name, filter, args) {
+    if (!filter || !name.startsWith('webNavigation.')) return true;
+    if (!Array.isArray(filter.url) || filter.url.length === 0) return true;
+    const href = args && args[0] && args[0].url;
+    return typeof href === 'string' && filter.url.some((f) => urlFilterMatches(f, href));
   }
 
   function createLocalEvent() {
@@ -155,7 +259,7 @@
   function createApi(init, bridge, options) {
     const opts = options || {};
     const log = opts.console || (typeof console !== 'undefined' ? console : { error() {}, warn() {} });
-    const ctx = { init, bridge, events: new Map(), lastError: undefined, ports: new Map(), portSeq: 0, menuHandlers: new Map(), menuSeq: 0 };
+    const ctx = { init, bridge, events: new Map(), lastError: undefined, ports: new Map(), portSeq: 0, menuHandlers: new Map(), menuSeq: 0, requestListeners: new Map(), listenerSeq: 0 };
     const syncFunctions = new Set(init.syncFunctions || []);
     const mv3 = init.manifest && init.manifest.manifest_version === 3;
 
@@ -180,7 +284,7 @@
           // One event object per name, shared by browser.* and chrome.*.
           let event = ctx.sharedEvents && ctx.sharedEvents.get(full);
           if (!event) {
-            event = createEvent(ctx, full);
+            event = ns === 'webRequest' ? createWebRequestEvent(ctx, full, log) : createEvent(ctx, full);
             (ctx.sharedEvents || (ctx.sharedEvents = new Map())).set(full, event);
           }
           nest(ev, null, event);
@@ -389,6 +493,32 @@
               .catch(() => {})
           );
           break;
+        case 'webRequest': {
+          // A request the core matched to one of this context's listeners. Blocking listeners answer with a
+          // BlockingResponse: returned, promised (Firefox), or passed to the callback (Chrome's asyncBlocking).
+          const entry = ctx.requestListeners.get(envelope.listenerId);
+          const wanted = envelope.replyTo !== null && envelope.replyTo !== undefined;
+          let answered = false;
+          const answer = (response) => {
+            if (!wanted || answered) return;
+            answered = true;
+            const value = response && typeof response === 'object' ? response : null;
+            bridge.call('__webRequest.reply', [envelope.replyTo, envelope.listenerId, value]).catch(() => {});
+          };
+          if (!entry) {
+            answer(null);
+            break;
+          }
+          let result;
+          try {
+            result = entry.async ? entry.cb(envelope.details, answer) : entry.cb(envelope.details);
+          } catch (e) {
+            log.error('Uncaught error in webRequest listener:', e);
+          }
+          if (result && typeof result.then === 'function') result.then(answer, () => answer(null));
+          else if (!entry.async || result !== undefined) answer(result);
+          break;
+        }
         default:
           log.warn('Unknown host message', envelope);
       }
@@ -453,6 +583,7 @@
         if (!entry) return 0;
         let called = 0;
         for (const listener of [...entry.listeners]) {
+          if (entry.filters && !passesFilter(name, entry.filters.get(listener), args)) continue;
           called++;
           safely(listener, args || []);
         }

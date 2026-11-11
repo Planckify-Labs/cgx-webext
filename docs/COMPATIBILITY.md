@@ -12,10 +12,11 @@ These six were installed from the stores into Ladybird and their popups opened (
 | Extension | Store | Coverage | Popup | Does its job | What is missing |
 |---|---|---:|---|---|---|
 | Ambient light for YouTube 2.38.17 (MV3) | Chrome | 100% | works | **no** | isolated worlds: its content script `import()`s a module that needs `chrome.*` in the content-script world |
-| SponsorBlock 6.1.7 (MV2) | Firefox | 98% | works | not checked on a sponsored video | `webNavigation.onCommitted` |
+| SponsorBlock 6.1.7 (MV2) | Firefox | 98% | works | not checked on a sponsored video | nothing known (`webNavigation.onCommitted` exists now; not run again) |
 | Dark Reader 4.9.135 (MV2) | Firefox | 92% | works, knows the site | **no** | its dark-theme detector reports light pages as dark on Ladybird and removes the theme (cause not found yet); `theme.*` for its optional browser-theme feature |
 | AnyDoc Translator 1.4.31 (MV3) | Chrome | 90% | works | not checked | `cookies`, `i18n.detectLanguage`, `webNavigation`, native messaging, `externally_connectable` |
-| uBlock Origin 1.76.0 (MV2) | Firefox | 67% | works (slow on the first open after install, while it compiles filter lists) | **no**, blocks nothing | `webRequest` (blocking), `webNavigation` |
+| uBlock Origin 1.76.0 (MV2) | Firefox | 78% | works (slow on the first open after install, while it compiles filter lists) | **yes** for network filtering: on a page that loads Google's ad, tag-manager and publisher-tag scripts it cancels or replaces all three and leaves an unrelated script alone (checked headless, November 2026). Cosmetic filtering not checked. As in Firefox it holds every request until its filter lists are ready: about 25 seconds on a first run in Ladybird, during which pages stay blank or without images (later starts not measured) | `webRequest.filterResponseData` (HTML filtering), `dom.openOrClosedShadowRoot` |
+| uBlock Origin Lite 2026.1110 (MV3) | Chrome | 71% | not checked | **yes** in the same test, from its static rulesets (redirects to its surrogate scripts, blocks the tag manager) | `userScripts`, `offscreen`, `storage.session.setAccessLevel` for its optional modes |
 | Surfingkeys 1.17.11 (MV2) | Firefox | 57% | works | partly | its in-page panel (an extension page in an iframe) starts without `chrome`; bookmarks, history, downloads, sessions, tab groups, `tts`, `userScripts`, native messaging |
 
 Coverage counts the APIs and manifest features the extension's code uses; the analyzer also lists Chrome-only members
@@ -82,7 +83,7 @@ The biggest single item is **ports** (`runtime.connect`, `runtime.onConnect`, `t
 
 - All five are **blocked today**. None would run yet, even with a browser integration, until the blockers above exist.
 - Several blockers are only *partial* use (an extension may guard a call or use it only in an optional feature). The tool cannot tell; running the extension would.
-- uBlock Origin and the other request blockers need network interception that the library does not provide; see `docs/INTEGRATION.md`.
+- The analysis below predates the network APIs (`webRequest`, `declarativeNetRequest`, `webNavigation`), which now exist; the table above is current.
 - The scan is lexical (see the README for its limits), so counts are good estimates, not proofs.
 
 ## Reproduce

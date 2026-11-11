@@ -10,8 +10,8 @@ How much of the Chrome and Firefox extension API surface is covered. Numbers cou
 
 | Browser | Members | core | +host | planned |
 |---|---:|---:|---:|---:|
-| Chrome | 399 | 38.6% | 40.6% | 237 |
-| Firefox | 417 | 37.9% | 39.6% | 252 |
+| Chrome | 399 | 47.1% | 49.1% | 203 |
+| Firefox | 417 | 45.6% | 47.2% | 220 |
 
 ## By namespace
 
@@ -33,7 +33,7 @@ Each cell is `core/+host/total` members available in that browser.
 | `contextualIdentities` | – | 0/0/11 | – |
 | `cookies` | 0/6/7 | 0/6/7 | 1 |
 | `declarativeContent` | – | – | – |
-| `declarativeNetRequest` | 0/0/14 | 0/0/11 | 14 |
+| `declarativeNetRequest` | 14/14/14 | 11/11/11 | 0 |
 | `desktopCapture` | 0/0/2 | – | 2 |
 | `devtools` | 0/0/7 | 0/0/7 | 7 |
 | `dns` | – | 0/0/1 | – |
@@ -74,8 +74,8 @@ Each cell is `core/+host/total` members available in that browser.
 | `topSites` | 0/0/1 | 0/0/1 | 1 |
 | `tts` | 0/0/6 | – | 6 |
 | `userScripts` | 0/0/8 | 0/0/8 | 8 |
-| `webNavigation` | 0/0/11 | 0/0/11 | 11 |
-| `webRequest` | 1/1/10 | 1/1/12 | 9 |
+| `webNavigation` | 11/11/11 | 11/11/11 | 0 |
+| `webRequest` | 10/10/10 | 11/11/12 | 0 |
 | `windows` | 13/13/13 | 12/12/12 | 0 |
 
 Status notes (partial members):
@@ -84,3 +84,8 @@ Status notes (partial members):
 - `extension.isAllowedFileSchemeAccess`: Always false: extensions cannot be allowed on file:// pages yet.
 - `extension.inIncognitoContext`: Always false: extensions do not run in private windows yet.
 - `storage.managed.get`: Always returns an empty object until enterprise policy is supported.
+- `webNavigation.onErrorOccurred`: Ladybird does not report failed navigations to extensions yet, so the event never fires.
+- `webNavigation.onCreatedNavigationTarget`: Ladybird does not report which navigation opened a tab yet, so the event never fires.
+- `webNavigation.onTabReplaced`: Ladybird never replaces a tab by another (no prerendering), so the event never fires.
+- `webRequest.getSecurityInfo`: Answers with what the browser reported when the response headers arrived; 'insecure' when it reported nothing.
+- `webRequest.onAuthRequired`: Ladybird does not report authentication challenges to extensions yet, so the event never fires.

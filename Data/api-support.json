@@ -268,44 +268,58 @@
       "permission": "webNavigation",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["getFrame", "getAllFrames"]
+        "implemented": ["getFrame", "getAllFrames"]
       },
       "events": {
-        "planned": ["onBeforeNavigate", "onCommitted", "onDOMContentLoaded", "onCompleted", "onErrorOccurred", "onHistoryStateUpdated", "onCreatedNavigationTarget", "onReferenceFragmentUpdated", "onTabReplaced"]
+        "implemented": ["onBeforeNavigate", "onCommitted", "onDOMContentLoaded", "onCompleted", "onHistoryStateUpdated", "onReferenceFragmentUpdated"],
+        "partial": ["onErrorOccurred", "onCreatedNavigationTarget", "onTabReplaced"]
+      },
+      "notes": {
+        "onErrorOccurred": "Ladybird does not report failed navigations to extensions yet, so the event never fires.",
+        "onCreatedNavigationTarget": "Ladybird does not report which navigation opened a tab yet, so the event never fires.",
+        "onTabReplaced": "Ladybird never replaces a tab by another (no prerendering), so the event never fires."
       }
     },
     "webRequest": {
       "permission": "webRequest",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["filterResponseData", "getSecurityInfo"],
-        "implemented": ["handlerBehaviorChanged"]
+        "planned": ["filterResponseData"],
+        "implemented": ["handlerBehaviorChanged"],
+        "partial": ["getSecurityInfo"]
       },
       "events": {
-        "planned": ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onAuthRequired", "onBeforeRedirect", "onResponseStarted", "onCompleted", "onErrorOccurred"]
+        "implemented": ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onBeforeRedirect", "onResponseStarted", "onCompleted", "onErrorOccurred"],
+        "partial": ["onAuthRequired"]
       },
       "only": {
         "filterResponseData": "firefox",
         "getSecurityInfo": "firefox"
       },
       "notes": {
-        "*": "Blocking handlers need 'webRequestBlocking'; Chrome allows them only for force-installed MV2 extensions.",
-        "handlerBehaviorChanged": "Resolves at once: the browser keeps no cache of webRequest decisions to flush."
+        "*": "Blocking handlers need 'webRequestBlocking'; Chrome allows them only in Manifest V2. Requests made by workers and WebSocket connections are not reported yet.",
+        "handlerBehaviorChanged": "Resolves at once: the browser keeps no cache of webRequest decisions to flush.",
+        "getSecurityInfo": "Answers with what the browser reported when the response headers arrived; 'insecure' when it reported nothing.",
+        "onAuthRequired": "Ladybird does not report authentication challenges to extensions yet, so the event never fires.",
+        "onCompleted": "Fires when the response headers have arrived, not when the body has ended."
       }
     },
     "declarativeNetRequest": {
       "permission": "declarativeNetRequest",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["updateDynamicRules", "getDynamicRules", "updateSessionRules", "getSessionRules", "updateEnabledRulesets", "getEnabledRulesets", "getAvailableStaticRuleCount", "getDisabledRuleIds", "updateStaticRules", "isRegexSupported", "testMatchOutcome", "setExtensionActionOptions", "getMatchedRules"]
+        "implemented": ["updateDynamicRules", "getDynamicRules", "updateSessionRules", "getSessionRules", "updateEnabledRulesets", "getEnabledRulesets", "getAvailableStaticRuleCount", "getDisabledRuleIds", "updateStaticRules", "isRegexSupported", "testMatchOutcome", "setExtensionActionOptions", "getMatchedRules"]
       },
       "events": {
-        "planned": ["onRuleMatchedDebug"]
+        "implemented": ["onRuleMatchedDebug"]
       },
       "only": {
         "getMatchedRules": "chrome",
         "onRuleMatchedDebug": "chrome",
         "setExtensionActionOptions": "chrome"
+      },
+      "notes": {
+        "*": "Rules apply to the requests of pages and frames; requests made by workers and WebSocket connections are not covered yet."
       }
     },
     "downloads": {

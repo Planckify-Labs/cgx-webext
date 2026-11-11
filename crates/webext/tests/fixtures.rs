@@ -147,28 +147,30 @@ fn storage_popup_full_flow() {
 }
 
 #[test]
-fn mv2_blocking_webrequest_is_blocked() {
+fn mv2_blocking_webrequest_needs_the_host() {
     let files = fixture("mv2-webrequest-blocker");
     let ext = load_extension(&files, None).unwrap();
     assert_eq!(ext.manifest.host_permissions, ["<all_urls>"]);
     let report = analyze(&Registry::builtin(), &ext.manifest, &files);
-    assert_eq!(report.verdict, Verdict::Blocked);
-    assert!(report.blockers.contains(&"webRequest.onBeforeRequest".to_string()));
-    assert!(report.blockers.contains(&"blocking webRequest".to_string()));
+    assert_eq!(report.verdict, Verdict::NeedsHost);
+    assert!(report.blockers.is_empty());
+    assert!(report.features.iter().any(|f| f.name == "blocking webRequest"));
+    let listener = report.apis.iter().find(|a| a.name == "webRequest.onBeforeRequest").expect("the listener is seen");
+    assert_eq!(listener.support, Support::Known(Status::Implemented));
     // browserAction resolves to action through the alias table; the core keeps the badge.
     let badge = report.apis.iter().find(|a| a.name == "action.setBadgeText").expect("alias resolved");
     assert_eq!(badge.support, Support::Known(Status::Implemented));
 }
 
 #[test]
-fn mv3_dnr_blocker_is_blocked_with_rulesets_detected() {
+fn mv3_dnr_blocker_needs_the_host_with_rulesets_detected() {
     let files = fixture("mv3-dnr-adblock");
     let ext = load_extension(&files, None).unwrap();
     assert_eq!(ext.manifest.declarative_net_request_rulesets.len(), 1);
     let report = analyze(&Registry::builtin(), &ext.manifest, &files);
-    assert_eq!(report.verdict, Verdict::Blocked);
-    assert!(report.blockers.contains(&"declarativeNetRequest.updateEnabledRulesets".to_string()));
-    assert!(report.blockers.contains(&"declarative_net_request rulesets".to_string()));
+    assert_eq!(report.verdict, Verdict::NeedsHost);
+    assert!(report.blockers.is_empty());
+    assert!(report.features.iter().any(|f| f.name == "declarative_net_request rulesets"));
 }
 
 #[test]
