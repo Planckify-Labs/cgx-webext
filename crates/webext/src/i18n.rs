@@ -137,6 +137,269 @@ impl I18n {
     }
 }
 
+/// Pure-Rust implementation of `i18n.detectLanguage(text)`: identifies script-distinct languages
+/// (Japanese, Korean, Chinese, Russian/Ukrainian, Arabic/Persian, Hebrew, Greek, Hindi, Thai, etc.)
+/// and major Latin-script languages using stop-word and character-n-gram cues.
+pub fn detect_language(text: &str) -> Value {
+    use serde_json::json;
+
+    let mut script_counts: HashMap<&'static str, usize> = HashMap::new();
+    let mut hiragana_katakana = 0usize;
+    let mut han = 0usize;
+    let mut cyrillic_uk = 0usize;
+    let mut arabic_fa = 0usize;
+    let mut latin_letters = 0usize;
+    let mut total_letters = 0usize;
+
+    for ch in text.chars() {
+        if !ch.is_alphabetic() {
+            continue;
+        }
+        total_letters += 1;
+        let cp = ch as u32;
+        match cp {
+            0x3040..=0x30FF | 0x31F0..=0x31FF => {
+                hiragana_katakana += 1;
+                *script_counts.entry("ja").or_default() += 1;
+            }
+            0xAC00..=0xD7AF | 0x1100..=0x11FF | 0x3130..=0x318F => {
+                *script_counts.entry("ko").or_default() += 1;
+            }
+            0x4E00..=0x9FFF | 0x3400..=0x4DBF => {
+                han += 1;
+            }
+            0x0400..=0x04FF => {
+                if matches!(ch, 'і' | 'І' | 'ї' | 'Ї' | 'є' | 'Є' | 'ґ' | 'Ґ') {
+                    cyrillic_uk += 1;
+                }
+                *script_counts.entry("cyrillic").or_default() += 1;
+            }
+            0x0370..=0x03FF => *script_counts.entry("el").or_default() += 1,
+            0x0590..=0x05FF => *script_counts.entry("he").or_default() += 1,
+            0x0600..=0x06FF => {
+                if matches!(ch, 'پ' | 'چ' | 'ژ' | 'گ' | 'ی' | 'ک') {
+                    arabic_fa += 1;
+                }
+                *script_counts.entry("arabic").or_default() += 1;
+            }
+            0x0900..=0x097F => *script_counts.entry("hi").or_default() += 1,
+            0x0980..=0x09FF => *script_counts.entry("bn").or_default() += 1,
+            0x0B80..=0x0BFF => *script_counts.entry("ta").or_default() += 1,
+            0x0E00..=0x0E7F => *script_counts.entry("th").or_default() += 1,
+            0x0530..=0x058F => *script_counts.entry("hy").or_default() += 1,
+            0x10A0..=0x10FF => *script_counts.entry("ka").or_default() += 1,
+            _ if cp < 0x0250 || (0x1E00..=0x1EFF).contains(&cp) => {
+                latin_letters += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if total_letters == 0 {
+        return json!({ "isReliable": false, "languages": [] });
+    }
+
+    let mut lang_weights: HashMap<&'static str, usize> = HashMap::new();
+    if han > 0 {
+        if hiragana_katakana > 0 {
+            *lang_weights.entry("ja").or_default() += han + hiragana_katakana;
+        } else {
+            *lang_weights.entry("zh").or_default() += han;
+        }
+    } else if hiragana_katakana > 0 {
+        *lang_weights.entry("ja").or_default() += hiragana_katakana;
+    }
+
+    for (script, count) in &script_counts {
+        match *script {
+            "ja" => {}
+            "cyrillic" => {
+                let code = if cyrillic_uk > 0 { "uk" } else { "ru" };
+                *lang_weights.entry(code).or_default() += *count;
+            }
+            "arabic" => {
+                let code = if arabic_fa > 0 { "fa" } else { "ar" };
+                *lang_weights.entry(code).or_default() += *count;
+            }
+            other => {
+                *lang_weights.entry(other).or_default() += *count;
+            }
+        }
+    }
+
+    let mut latin_confident = false;
+    if latin_letters > 0 {
+        let (code, confident) = detect_latin_language(text);
+        latin_confident = confident;
+        *lang_weights.entry(code).or_default() += latin_letters;
+    }
+
+    let mut ranked: Vec<(&'static str, usize)> = lang_weights.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    ranked.truncate(3);
+
+    let sum: usize = ranked.iter().map(|(_, c)| *c).sum::<usize>().max(1);
+    let languages: Vec<Value> = ranked
+        .iter()
+        .map(|(code, count)| {
+            let pct = ((*count as f64 / sum as f64) * 100.0).round() as u64;
+            json!({ "language": code, "percentage": pct.clamp(1, 100) })
+        })
+        .collect();
+
+    let top_share = ranked.first().map(|(_, c)| *c as f64 / total_letters as f64).unwrap_or(0.0);
+    let non_latin_top = ranked.first().is_some_and(|(code, _)| {
+        matches!(*code, "ja" | "ko" | "zh" | "ru" | "uk" | "el" | "he" | "ar" | "fa" | "hi" | "bn" | "ta" | "th" | "hy" | "ka")
+    });
+    let is_reliable = total_letters >= 10 && top_share >= 0.6 && (non_latin_top || latin_confident);
+
+    json!({ "isReliable": is_reliable, "languages": languages })
+}
+
+fn detect_latin_language(text: &str) -> (&'static str, bool) {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty()).collect();
+
+    // Language profiles: (code, distinctive diacritics, high-frequency stop words)
+    const PROFILES: &[(&str, &str, &[&str])] = &[
+        (
+            "en",
+            "",
+            &[
+                "the", "and", "that", "have", "for", "not", "with", "you", "this", "but", "from", "they", "which", "would", "there",
+                "their", "what", "about", "hello", "world",
+            ],
+        ),
+        (
+            "es",
+            "ñ¿¡áéíóú",
+            &[
+                "que", "los", "las", "por", "con", "para", "una", "como", "pero", "más", "este", "esta", "hola", "mundo", "del", "son",
+                "está", "entre", "también",
+            ],
+        ),
+        (
+            "fr",
+            "çœêîôûàèùé",
+            &[
+                "les", "des", "est", "que", "dans", "une", "pour", "pas", "sur", "plus", "avec", "tout", "mais", "nous", "vous", "bonjour",
+                "monde", "cette", "sont",
+            ],
+        ),
+        (
+            "de",
+            "ßäöü",
+            &[
+                "der", "die", "und", "den", "von", "zu", "das", "mit", "sich", "des", "auf", "für", "ist", "nicht", "ein", "eine", "auch",
+                "hallo", "welt", "sind",
+            ],
+        ),
+        (
+            "pt",
+            "ãõçáéíóúâêô",
+            &[
+                "que", "não", "uma", "com", "para", "por", "mais", "como", "mas", "foi", "dos", "das", "seu", "sua", "olá", "mundo",
+                "está", "você", "são",
+            ],
+        ),
+        (
+            "it",
+            "àèéìòù",
+            &[
+                "che", "non", "per", "una", "con", "sono", "della", "anche", "come", "questo", "questa", "ciao", "mondo", "degli", "nella",
+                "tutto", "stato", "più",
+            ],
+        ),
+        (
+            "nl",
+            "ĳëï",
+            &[
+                "het", "een", "van", "dat", "niet", "zijn", "voor", "met", "ook", "naar", "maar", "door", "over", "heeft", "worden",
+                "deze", "wereld", "hallo",
+            ],
+        ),
+        (
+            "pl",
+            "ąćęłńóśźż",
+            &[
+                "nie", "się", "jest", "jak", "ale", "tylko", "przez", "jego", "tego", "oraz", "być", "może", "które", "bardzo", "cześć",
+                "świat",
+            ],
+        ),
+        (
+            "tr",
+            "ğışçöü",
+            &[
+                "bir",
+                "için",
+                "olan",
+                "daha",
+                "olarak",
+                "gibi",
+                "kadar",
+                "ancak",
+                "sonra",
+                "tarafından",
+                "merhaba",
+                "dünya",
+                "ile",
+                "çok",
+                "değil",
+            ],
+        ),
+        (
+            "vi",
+            "ăâđêôơưàảãáạằẳẵắặầẩẫấậèẻẽéẹềểễếệìỉĩíịòỏõóọồổỗốộờởỡớợùủũúụừửữứựỳỷỹýỵ",
+            &["của", "không", "trong", "những", "người", "được", "một", "cho", "với", "này", "các", "như", "khi", "xin", "chào"],
+        ),
+        (
+            "sv",
+            "åäö",
+            &[
+                "och", "att", "det", "som", "för", "med", "inte", "till", "har", "den", "och", "kan", "från", "eller", "var", "hej",
+                "världen",
+            ],
+        ),
+        (
+            "id",
+            "",
+            &[
+                "yang", "dan", "dari", "untuk", "dengan", "tidak", "pada", "dalam", "adalah", "ini", "itu", "akan", "juga", "atau", "halo",
+                "dunia",
+            ],
+        ),
+    ];
+
+    let mut scores: Vec<(&'static str, usize)> = PROFILES
+        .iter()
+        .map(|(code, diacritics, stop_words)| {
+            let mut score = 0usize;
+            for w in &words {
+                if stop_words.contains(w) {
+                    score += 4;
+                }
+            }
+            if !diacritics.is_empty() {
+                for ch in lower.chars() {
+                    if diacritics.contains(ch) {
+                        score += 2;
+                    }
+                }
+            }
+            (*code, score)
+        })
+        .collect();
+
+    scores.sort_by_key(|b| std::cmp::Reverse(b.1));
+    let best = scores[0];
+    let second = scores[1];
+    if best.1 == 0 {
+        return ("en", false);
+    }
+    let confident = best.1 >= 6 && best.1 > second.1;
+    (best.0, confident)
+}
+
 /// Expands `$name$` placeholders, `$1`..`$9` substitutions and `$$`.
 fn expand(text: &str, placeholders: &HashMap<String, String>, subs: &[String]) -> String {
     fn go(text: &str, placeholders: &HashMap<String, String>, subs: &[String], depth: usize, out: &mut String) {
@@ -247,5 +510,22 @@ mod tests {
         assert!(i.add_locale("en", "nope").is_err());
         assert!(i.add_locale("en", "[]").is_err());
         assert_eq!(i.add_locale("en", r#"{"a": {"description": "no message"}, "b": {"message": "ok"}}"#).unwrap(), 1);
+    }
+
+    #[test]
+    fn detect_language_scripts_and_latin() {
+        assert_eq!(detect_language("The quick brown fox jumps over the lazy dog and this is English")["languages"][0]["language"], "en");
+        assert_eq!(detect_language("The quick brown fox jumps over the lazy dog and this is English")["isReliable"], true);
+        assert_eq!(detect_language("Bonjour tout le monde, nous sommes très heureux avec cette journée")["languages"][0]["language"], "fr");
+        assert_eq!(detect_language("Hola mundo, los días son más largos para todos con esta canción")["languages"][0]["language"], "es");
+        assert_eq!(detect_language("Hallo Welt, der schnelle Fuchs springt über den großen Hund")["languages"][0]["language"], "de");
+        assert_eq!(detect_language("こんにちは世界、今日はとても良い天気ですね")["languages"][0]["language"], "ja");
+        assert_eq!(detect_language("你好世界，今天天气非常好，我们去公园散步吧")["languages"][0]["language"], "zh");
+        assert_eq!(detect_language("안녕하세요 세계 오늘 날씨가 정말 좋습니다")["languages"][0]["language"], "ko");
+        assert_eq!(detect_language("Привет мир, сегодня очень хорошая погода")["languages"][0]["language"], "ru");
+        assert_eq!(detect_language("Привіт світ, сьогодні дуже гарна погода в Україні")["languages"][0]["language"], "uk");
+        assert_eq!(detect_language("مرحبا بالعالم هذا نص باللغة العربية")["languages"][0]["language"], "ar");
+        assert_eq!(detect_language("12345 !!!")["languages"].as_array().unwrap().len(), 0);
+        assert_eq!(detect_language("12345 !!!")["isReliable"], false);
     }
 }

@@ -4,6 +4,38 @@
 
 How do real, popular, signed extensions fare? The first section is from running them in Ladybird. The static snapshot further down comes from `Tools/real_world.sh`, which downloads extensions from addons.mozilla.org and runs `webext-coverage inspect` on each (static analysis only).
 
+## Run in Ladybird (24 November 2026)
+
+Fifteen extensions downloaded from the Chrome Web Store and addons.mozilla.org, each run alone in a fresh profile on a
+private X server with `WEBEXT_TRACE=1`, on a page that exercises it (adblock-tester.com for blockers, a YouTube video for
+the YouTube ones, Wikipedia for Read Aloud), with their toolbar popup opened. `Tools/run_extension_suite.py` repeats this.
+
+| Extension | Store | Popup | Does its job | What is missing |
+|---|---|---|---|---|
+| uBlock Origin | Firefox | works | **yes**: 28-32 requests blocked on the test page | `dns.resolve` (CNAME uncloaking), `filterResponseData` |
+| AdGuard | Firefox | works | **yes**: requests blocked, counted in the popup | nothing found |
+| uBlock Origin Lite | Chrome | works | yes (static rulesets) | nothing found |
+| AdGuard | Chrome | works | blocks (e.g. Google's ad script) | its "Blocked" counter stays 0: it gets `onRuleMatchedDebug`, which Chrome sends to unpacked extensions only (roadmap item 6) |
+| Bitwarden | Chrome | works (login and onboarding screens) | not checked (needs an account) | nothing found |
+| Bitwarden | Firefox | works | not checked (needs an account) | nothing found |
+| Tampermonkey | Chrome | works | not checked | nothing found |
+| Violentmonkey | Firefox | works | not checked | nothing found |
+| SponsorBlock | Chrome | works, on a YouTube video | runs (no segments exist for the test video, so skipping was not seen) | nothing found |
+| Return YouTube Dislike | Chrome | – | no errors; dislike count not checked | nothing found |
+| Video DownloadHelper | Chrome | works, lists the video's formats | not checked (downloading needs `downloads`) | `downloads` primitives |
+| Session Buddy | Chrome | opens its page | not checked | nothing found |
+| Read Aloud | Chrome | works | **no**: asks for a cloud voice account | `tts` primitives (roadmap item 3) |
+| OneTab | Chrome | collects the tabs, opens its page | **no**: its page says "OneTab needs to restart" | its background does not answer the page's `corePing` (cause not found) |
+| Stylus | Chrome | **blank** | **no** | `navigator.serviceWorker` for extension pages (roadmap item 1) |
+
+Fixed while running them: Firefox's synchronous `publicSuffix` (uBlock's popup was blank), `tabs.onReplaced` for Firefox
+(AdGuard never finished starting), Chrome's enum objects such as `declarativeNetRequest.RuleActionType` (AdGuard),
+`tabs.query` by extension-page URL, CORS-free fetches from extension pages to permitted hosts and `sender.origin`
+(Bitwarden), `importScripts` for service-worker backgrounds (Bitwarden, Tampermonkey, Read Aloud), top-level scope for
+injected scripts (Read Aloud), `getUILanguage()` as a language tag and a localized `getManifest()` for Firefox builds
+(Violentmonkey), `windows.getLastFocused` without a focused window (OneTab), and the Hub process split, which had left
+the toolbar, popups and window-related calls disconnected on Linux.
+
 ## Run in Ladybird (11 November 2026)
 
 These six were installed from the stores into Ladybird and their popups opened (off-screen, `--force-cpu-painting`, with
@@ -11,7 +43,7 @@ These six were installed from the stores into Ladybird and their popups opened (
 
 | Extension | Store | Coverage | Popup | Does its job | What is missing |
 |---|---|---:|---|---|---|
-| Ambient light for YouTube 2.38.17 (MV3) | Chrome | 100% | works | **no** | isolated worlds: its content script `import()`s a module that needs `chrome.*` in the content-script world |
+| Ambient light for YouTube 2.38.17 (MV3) | Chrome | 100% | works | not confirmed | its content script now runs in an isolated world and its `import()`ed module gets `chrome.*` (it reads and writes `chrome.storage` as it starts; checked headless on a YouTube watch page, 12 November 2026). The glow itself was not seen: the video does not play without user interaction in a headless run, so nothing was drawn. Not checked in a window |
 | SponsorBlock 6.1.7 (MV2) | Firefox | 98% | works | not checked on a sponsored video | nothing known (`webNavigation.onCommitted` exists now; not run again) |
 | Dark Reader 4.9.135 (MV2) | Firefox | 92% | works, knows the site | **no** | its dark-theme detector reports light pages as dark on Ladybird and removes the theme (cause not found yet); `theme.*` for its optional browser-theme feature |
 | AnyDoc Translator 1.4.31 (MV3) | Chrome | 90% | works | not checked | `cookies`, `i18n.detectLanguage`, `webNavigation`, native messaging, `externally_connectable` |

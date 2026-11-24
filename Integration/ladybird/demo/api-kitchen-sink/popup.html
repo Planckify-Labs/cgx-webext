@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebExt API Coverage Test</title>
+  <style>
+    body { font: 13px/1.4 system-ui, sans-serif; width: 420px; margin: 0; padding: 12px; color: #111; background: #fff; }
+    h1 { font-size: 15px; margin: 0 0 8px; }
+    #summary { font-weight: 600; margin-bottom: 10px; }
+    button { padding: 5px 10px; margin-bottom: 10px; cursor: pointer; }
+    ul { list-style: none; padding: 0; margin: 0; max-height: 440px; overflow: auto; }
+    li { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid #eee; }
+    .ok { color: #15803d; font-weight: 600; }
+    .fail { color: #b91c1c; font-weight: 600; }
+    .detail { color: #555; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+  </style>
+</head>
+<body>
+  <h1>WebExt End-to-End API Test</h1>
+  <div id="summary">Running checks...</div>
+  <button id="rerun">Re-run all checks</button>
+  <ul id="results"></ul>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -30,6 +30,7 @@ pub const KNOWN_API_PERMISSIONS: &[&str] = &[
     "downloads",
     "downloads.open",
     "downloads.shelf",
+    "downloads.ui",
     "find",
     "fontSettings",
     "gcm",

@@ -39,6 +39,8 @@
   // Constant properties. The storage quotas must equal the ones the core enforces (checked by a Rust test).
   const CONSTANTS = {
     'tabs.TAB_ID_NONE': -1,
+    'tabGroups.TAB_GROUP_ID_NONE': -1,
+    'sessions.MAX_SESSION_RESULTS': 25,
     // Extensions do not run in private windows yet, so no context is an incognito one.
     'extension.inIncognitoContext': false,
     'windows.WINDOW_ID_NONE': -1,
@@ -66,6 +68,78 @@
     'declarativeNetRequest.SESSION_RULESET_ID': '_session',
     'webRequest.MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES': 20,
   };
+
+  // The browsers' enum objects (chrome.runtime.PlatformOs.MAC === 'mac'), as their API schemas define them. Each value's key
+  // is derived the way Chrome derives it: words split at case changes and punctuation, upper-cased ('x86-64' -> X86_64,
+  // 'allowAllRequests' -> ALLOW_ALL_REQUESTS).
+  const ENUMS = {
+    'runtime.PlatformOs': ['mac', 'win', 'android', 'cros', 'linux', 'openbsd', 'fuchsia'],
+    'runtime.PlatformArch': ['arm', 'arm64', 'x86-32', 'x86-64', 'mips', 'mips64'],
+    'runtime.PlatformNaclArch': ['arm', 'x86-32', 'x86-64', 'mips', 'mips64'],
+    'runtime.OnInstalledReason': ['install', 'update', 'chrome_update', 'shared_module_update'],
+    'runtime.OnRestartRequiredReason': ['app_update', 'os_update', 'periodic'],
+    'runtime.RequestUpdateCheckStatus': ['throttled', 'no_update', 'update_available'],
+    'runtime.ContextType': ['TAB', 'POPUP', 'BACKGROUND', 'OFFSCREEN_DOCUMENT', 'SIDE_PANEL', 'DEVELOPER_TOOLS'],
+    'extension.ViewType': ['tab', 'popup'],
+    'tabs.TabStatus': ['unloaded', 'loading', 'complete'],
+    'tabs.MutedInfoReason': ['user', 'capture', 'extension'],
+    'tabs.WindowType': ['normal', 'popup', 'panel', 'app', 'devtools'],
+    'tabs.ZoomSettingsMode': ['automatic', 'manual', 'disabled'],
+    'tabs.ZoomSettingsScope': ['per-origin', 'per-tab'],
+    'windows.WindowType': ['normal', 'popup', 'panel', 'app', 'devtools'],
+    'windows.WindowState': ['normal', 'minimized', 'maximized', 'fullscreen', 'locked-fullscreen'],
+    'windows.CreateType': ['normal', 'popup', 'panel'],
+    'tabGroups.Color': ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'],
+    'declarativeNetRequest.ResourceType': ['main_frame', 'sub_frame', 'stylesheet', 'script', 'image', 'font', 'object', 'xmlhttprequest', 'ping', 'csp_report', 'media', 'websocket', 'webtransport', 'webbundle', 'other'],
+    'declarativeNetRequest.RequestMethod': ['connect', 'delete', 'get', 'head', 'options', 'patch', 'post', 'put', 'other'],
+    'declarativeNetRequest.DomainType': ['firstParty', 'thirdParty'],
+    'declarativeNetRequest.RuleActionType': ['block', 'redirect', 'allow', 'upgradeScheme', 'modifyHeaders', 'allowAllRequests'],
+    'declarativeNetRequest.HeaderOperation': ['append', 'set', 'remove'],
+    'declarativeNetRequest.UnsupportedRegexReason': ['syntaxError', 'memoryLimitExceeded'],
+    'webRequest.ResourceType': ['main_frame', 'sub_frame', 'stylesheet', 'script', 'image', 'font', 'object', 'xmlhttprequest', 'ping', 'csp_report', 'media', 'websocket', 'webbundle', 'other'],
+    'webRequest.OnBeforeRequestOptions': ['blocking', 'requestBody', 'extraHeaders'],
+    'webRequest.OnBeforeSendHeadersOptions': ['requestHeaders', 'blocking', 'extraHeaders'],
+    'webRequest.OnSendHeadersOptions': ['requestHeaders', 'extraHeaders'],
+    'webRequest.OnHeadersReceivedOptions': ['blocking', 'responseHeaders', 'extraHeaders'],
+    'webRequest.OnAuthRequiredOptions': ['responseHeaders', 'blocking', 'asyncBlocking', 'extraHeaders'],
+    'webRequest.OnResponseStartedOptions': ['responseHeaders', 'extraHeaders'],
+    'webRequest.OnBeforeRedirectOptions': ['responseHeaders', 'extraHeaders'],
+    'webRequest.OnCompletedOptions': ['responseHeaders', 'extraHeaders'],
+    'webRequest.OnErrorOccurredOptions': ['extraHeaders'],
+    'webRequest.IgnoredActionType': ['redirect', 'request_headers', 'response_headers', 'auth_credentials'],
+    'webNavigation.TransitionType': ['link', 'typed', 'auto_bookmark', 'auto_subframe', 'manual_subframe', 'generated', 'start_page', 'form_submit', 'reload', 'keyword', 'keyword_generated'],
+    'webNavigation.TransitionQualifier': ['client_redirect', 'server_redirect', 'forward_back', 'from_address_bar'],
+    'contextMenus.ContextType': ['all', 'page', 'frame', 'selection', 'link', 'editable', 'image', 'video', 'audio', 'launcher', 'browser_action', 'page_action', 'action'],
+    'contextMenus.ItemType': ['normal', 'checkbox', 'radio', 'separator'],
+    'cookies.SameSiteStatus': ['no_restriction', 'lax', 'strict', 'unspecified'],
+    'cookies.OnChangedCause': ['evicted', 'expired', 'explicit', 'expired_overwrite', 'overwrite'],
+    'downloads.FilenameConflictAction': ['uniquify', 'overwrite', 'prompt'],
+    'downloads.State': ['in_progress', 'interrupted', 'complete'],
+    'downloads.HttpMethod': ['GET', 'POST'],
+    'downloads.DangerType': ['file', 'url', 'content', 'uncommon', 'host', 'unwanted', 'safe', 'accepted'],
+    'history.TransitionType': ['link', 'typed', 'auto_bookmark', 'auto_subframe', 'manual_subframe', 'generated', 'auto_toplevel', 'form_submit', 'reload', 'keyword', 'keyword_generated'],
+    'storage.AccessLevel': ['TRUSTED_CONTEXTS', 'TRUSTED_AND_UNTRUSTED_CONTEXTS'],
+    'scripting.ExecutionWorld': ['ISOLATED', 'MAIN'],
+    'scripting.StyleOrigin': ['AUTHOR', 'USER'],
+    'userScripts.ExecutionWorld': ['MAIN', 'USER_SCRIPT'],
+    'notifications.TemplateType': ['basic', 'image', 'list', 'progress'],
+    'notifications.PermissionLevel': ['granted', 'denied'],
+    'idle.IdleState': ['active', 'idle', 'locked'],
+    'omnibox.DescriptionStyleType': ['url', 'match', 'dim'],
+    'omnibox.OnInputEnteredDisposition': ['currentTab', 'newForegroundTab', 'newBackgroundTab'],
+    'management.ExtensionType': ['extension', 'hosted_app', 'packaged_app', 'legacy_packaged_app', 'theme', 'login_screen_extension'],
+    'management.ExtensionInstallType': ['admin', 'development', 'normal', 'sideload', 'other'],
+    'management.ExtensionDisabledReason': ['unknown', 'permissions_increase'],
+    'management.LaunchType': ['OPEN_AS_REGULAR_TAB', 'OPEN_AS_PINNED_TAB', 'OPEN_AS_WINDOW', 'OPEN_FULL_SCREEN'],
+    'offscreen.Reason': ['TESTING', 'AUDIO_PLAYBACK', 'IFRAME_SCRIPTING', 'DOM_SCRAPING', 'BLOBS', 'DOM_PARSER', 'USER_MEDIA', 'DISPLAY_MEDIA', 'WEB_RTC', 'CLIPBOARD', 'LOCAL_STORAGE', 'WORKERS', 'BATTERY_STATUS', 'MATCH_MEDIA', 'GEOLOCATION'],
+    'fontSettings.GenericFamily': ['standard', 'sansserif', 'serif', 'fixed', 'cursive', 'fantasy', 'math'],
+    'fontSettings.LevelOfControl': ['not_controllable', 'controlled_by_other_extensions', 'controllable_by_this_extension', 'controlled_by_this_extension'],
+    'tts.EventType': ['start', 'end', 'word', 'sentence', 'marker', 'interrupted', 'cancelled', 'error', 'pause', 'resume'],
+  };
+
+  function enumKey(value) {
+    return value.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[^A-Za-z0-9]+/g, '_').toUpperCase();
+  }
 
   // sendMessage results arrive as { response } when a listener answered and {} when listeners existed but none did, so that
   // "answered with null" and "no answer" stay distinguishable. Browsers resolve the latter with undefined.
@@ -297,6 +371,75 @@
         Object.defineProperty(tree.runtime, 'id', { value: init.id, enumerable: true });
         Object.defineProperty(tree.runtime, 'lastError', { get: () => ctx.lastError, enumerable: true });
       }
+      if (tree.extension) {
+        Object.defineProperty(tree.extension, 'lastError', { get: () => ctx.lastError, enumerable: true });
+      }
+      // BrowserSetting objects (privacy.* and browserSettings.*): { get, set, clear, onChange }.
+      const makeSetting = (key) => {
+        const invoke = (op, args) => {
+          const callArgs = [key, ...(args[0] && typeof args[0] === 'object' ? [args[0]] : [{}])];
+          if (style === 'browser') {
+            if (typeof args[args.length - 1] === 'function') {
+              throw new TypeError(`browser.${key}.${op}: callbacks are not supported; use the returned Promise`);
+            }
+            return bridge.call(`__setting.${op}`, callArgs);
+          }
+          const last = args[args.length - 1];
+          if (typeof last === 'function') {
+            const cb = args.pop();
+            bridge.call(`__setting.${op}`, [key, ...(args[0] && typeof args[0] === 'object' ? [args[0]] : [{}])]).then(
+              (result) => { ctx.lastError = undefined; safely(cb, [result]); },
+              (error) => {
+                ctx.lastError = { message: error && error.message ? error.message : String(error) };
+                try { safely(cb, []); } finally { ctx.lastError = undefined; }
+              }
+            );
+            return undefined;
+          }
+          const p = bridge.call(`__setting.${op}`, callArgs);
+          if (mv3) return p;
+          p.catch(() => {});
+          return undefined;
+        };
+        const evName = `__setting.onChange:${key}`;
+        let onChange = ctx.sharedEvents && ctx.sharedEvents.get(evName);
+        if (!onChange) {
+          onChange = createEvent(ctx, evName);
+          (ctx.sharedEvents || (ctx.sharedEvents = new Map())).set(evName, onChange);
+        }
+        return {
+          get: (...args) => invoke('get', args),
+          set: (...args) => invoke('set', args),
+          clear: (...args) => invoke('clear', args),
+          onChange,
+        };
+      };
+      if (tree.privacy) {
+        const privacyGroups = {
+          network: ['networkPredictionEnabled', 'webRTCIPHandlingPolicy', 'peerConnectionEnabled', 'httpsOnlyMode', 'globalPrivacyControl'],
+          services: ['autofillEnabled', 'autofillAddressEnabled', 'autofillCreditCardEnabled', 'passwordSavingEnabled', 'safeBrowsingEnabled', 'searchSuggestEnabled', 'spellingServiceEnabled', 'translationServiceEnabled'],
+          websites: ['thirdPartyCookiesAllowed', 'hyperlinkAuditingEnabled', 'referrersEnabled', 'protectedContentEnabled', 'doNotTrackEnabled', 'resistFingerprinting', 'firstPartyIsolate', 'cookieConfig', 'trackingProtectionMode'],
+        };
+        for (const [group, keys] of Object.entries(privacyGroups)) {
+          const obj = {};
+          for (const k of keys) obj[k] = makeSetting(`privacy.${group}.${k}`);
+          tree.privacy[group] = obj;
+        }
+      }
+      if (tree.browserSettings) {
+        const props = (init.surface.browserSettings && init.surface.browserSettings.properties) || [];
+        for (const prop of props) {
+          if (prop === 'colorManagement') {
+            tree.browserSettings.colorManagement = {
+              mode: makeSetting('browserSettings.colorManagement.mode'),
+              useNativeSRGB: makeSetting('browserSettings.colorManagement.useNativeSRGB'),
+              useWebRenderCompositor: makeSetting('browserSettings.colorManagement.useWebRenderCompositor'),
+            };
+          } else {
+            tree.browserSettings[prop] = makeSetting(`browserSettings.${prop}`);
+          }
+        }
+      }
       // Constants, for the namespaces this extension can see.
       for (const [full, value] of Object.entries(CONSTANTS)) {
         const [ns, ...path] = full.split('.');
@@ -304,6 +447,17 @@
         let cur = tree[ns];
         for (const p of path.slice(0, -1)) cur = cur[p] || (cur[p] = {});
         Object.defineProperty(cur, path[path.length - 1], { value, enumerable: true });
+      }
+      for (const [full, values] of Object.entries(ENUMS)) {
+        const [ns, ...path] = full.split('.');
+        if (!tree[ns]) continue;
+        let cur = tree[ns];
+        for (const p of path.slice(0, -1)) cur = cur[p] || (cur[p] = {});
+        const name = path[path.length - 1];
+        if (Object.prototype.hasOwnProperty.call(cur, name)) continue;
+        const object = {};
+        for (const v of values) object[enumKey(v)] = v;
+        Object.defineProperty(cur, name, { value: Object.freeze(object), enumerable: true });
       }
       // Browser-specific aliases.
       if (init.surface.action && !tree.browserAction) tree.browserAction = tree.action;
@@ -581,11 +735,16 @@
         }
         const entry = ctx.events.get(name);
         if (!entry) return 0;
+        let callArgs = args || [];
+        if (name === 'omnibox.onInputChanged') {
+          const suggest = (suggestions) => { bridge.call('__omnibox.suggest', [Array.isArray(suggestions) ? suggestions : []]).catch(() => {}); };
+          callArgs = [callArgs[0], suggest];
+        }
         let called = 0;
         for (const listener of [...entry.listeners]) {
-          if (entry.filters && !passesFilter(name, entry.filters.get(listener), args)) continue;
+          if (entry.filters && !passesFilter(name, entry.filters.get(listener), callArgs)) continue;
           called++;
-          safely(listener, args || []);
+          safely(listener, callArgs);
         }
         return called;
       },

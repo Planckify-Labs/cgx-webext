@@ -40,6 +40,27 @@ use serde_json::{Map, Value, json};
 
 /// Namespaces (and single members) whose functions this module implements.
 pub fn handles(full_name: &str) -> bool {
+    if matches!(
+        full_name,
+        "tabs.group"
+            | "tabs.ungroup"
+            | "tabs.getZoomSettings"
+            | "tabs.setZoomSettings"
+            | "tabs.hide"
+            | "tabs.show"
+            | "tabs.captureTab"
+            | "tabs.print"
+            | "tabs.printPreview"
+            | "tabs.saveAsPDF"
+            | "tabs.toggleReaderMode"
+            | "tabs.warmup"
+            | "tabs.moveInSuccession"
+            | "contextMenus.overrideContext"
+            | "contextMenus.getTargetElement"
+            | "commands.openShortcutSettings"
+    ) {
+        return false;
+    }
     let ns = full_name.split('.').next().unwrap_or("");
     matches!(
         ns,
@@ -65,6 +86,12 @@ pub fn handles(full_name: &str) -> bool {
             | "management.getSelf"
             | "management.getAll"
             | "management.get"
+            | "management.setEnabled"
+            | "management.uninstall"
+            | "management.uninstallSelf"
+            | "management.getPermissionWarningsById"
+            | "management.getPermissionWarningsByManifest"
+            | "management.install"
             | "i18n.getAcceptLanguages"
             | "extension.isAllowedIncognitoAccess"
             | "extension.isAllowedFileSchemeAccess"
@@ -396,7 +423,15 @@ impl Dispatcher {
                 }
                 Value::Null
             }
-            other => json!({ "error": format!("unknown host event '{other}'") }),
+            other => {
+                if let Some(v) = self.data_host_event(other, args) {
+                    return v;
+                }
+                if let Some(v) = self.platform_host_event(other, args) {
+                    return v;
+                }
+                json!({ "error": format!("unknown host event '{other}'") })
+            }
         }
     }
 
@@ -426,8 +461,10 @@ impl Dispatcher {
         for c in &changes {
             if let Change::TabRemoved { tab_id, .. } = c {
                 self.network_tab_removed(*tab_id);
+                self.platform.borrow_mut().forget_tab(*tab_id);
             }
         }
+        self.record_sessions_from_browser_diff(&old, &new);
         let mut events = vec![];
         for id in self.installed_ids() {
             self.with_visibility(&id, |vis| {
@@ -1029,10 +1066,13 @@ impl Dispatcher {
             return body;
         }
         let key = serde_json::to_string(binding).unwrap_or_default();
-        let browser = if firefox { "let browser = __cgxApi && __cgxApi.browser;" } else { "" };
-        // A block, so that `chrome` is bound for this code only and the block's completion value is the code's.
+        let browser = if firefox { "define('browser', api.browser);" } else { "" };
+        // The code runs at the top level of the isolated world, as in Chrome and Firefox, so that its top-level `const`,
+        // `let` and `class` declarations are seen by later injections (one file of executeScript defines what the next
+        // uses). `chrome` (and `browser`) are globals of the isolated world, which the page does not see. The prelude is a
+        // statement whose value is undefined, so the script's completion value is still the code's.
         format!(
-            "{{ let __cgxApi = globalThis[{key}]; try {{ delete globalThis[{key}]; }} catch (e) {{}} let chrome = __cgxApi && __cgxApi.chrome; {browser} void 0;\n{body}\n}}"
+            "(function () {{ var api = globalThis[{key}]; try {{ delete globalThis[{key}]; }} catch (e) {{}} if (!api) return; var define = function (name, value) {{ Object.defineProperty(globalThis, name, {{ value: value, writable: true, configurable: true }}); }}; define('chrome', api.chrome); {browser} }})();\n{body}"
         )
     }
 
@@ -1531,7 +1571,9 @@ impl Dispatcher {
                 reply(self.window_for(call, id, populate(&a1)))
             }
             "getCurrent" | "getLastFocused" => {
-                let id = if op == "getCurrent" { self.current_window(call) } else { self.browser.borrow().last_focused_window };
+                // Like Chrome, getLastFocused answers with a window even when none has focus now (the browser is in the
+                // background): the one focused last, else the first normal window.
+                let id = if op == "getCurrent" { self.current_window(call) } else { self.browser.borrow().current_window(None) };
                 match id {
                     Some(id) => reply(self.window_for(call, id, populate(&a0))),
                     None => reply(Err(ApiError::runtime("No current window"))),
@@ -1675,7 +1717,7 @@ impl Dispatcher {
             }
             "runtime.getContexts" => {
                 let filter = call.arg(0).clone();
-                let list: Vec<Value> = {
+                let mut list: Vec<Value> = {
                     let bus = self.bus.borrow();
                     let state = self.browser.borrow();
                     bus.contexts_of(&call.extension_id)
@@ -1699,20 +1741,35 @@ impl Dispatcher {
                                 "incognito": false,
                             })
                         })
-                        .filter(|c| {
-                            let matches_list = |key: &str, field: &str| {
-                                filter.get(key).and_then(Value::as_array).is_none_or(|l| l.iter().any(|v| *v == c[field]))
-                            };
-                            matches_list("contextTypes", "contextType")
-                                && matches_list("tabIds", "tabId")
-                                && matches_list("windowIds", "windowId")
-                                && matches_list("frameIds", "frameId")
-                                && matches_list("documentUrls", "documentUrl")
-                                && matches_list("documentOrigins", "documentOrigin")
-                                && matches_list("contextIds", "contextId")
-                        })
                         .collect()
                 };
+                if let Some(doc) = self.platform.borrow().offscreen.get(&call.extension_id).cloned() {
+                    list.push(json!({
+                        "contextType": "OFFSCREEN_DOCUMENT",
+                        "contextId": "00000000-0000-4000-8000-000000000001",
+                        "tabId": -1,
+                        "windowId": -1,
+                        "frameId": 0,
+                        "documentUrl": doc.url,
+                        "documentOrigin": browser::origin_of(&doc.url),
+                        "incognito": false,
+                    }));
+                }
+                let list: Vec<Value> = list
+                    .into_iter()
+                    .filter(|c| {
+                        let matches_list = |key: &str, field: &str| {
+                            filter.get(key).and_then(Value::as_array).is_none_or(|l| l.iter().any(|v| *v == c[field]))
+                        };
+                        matches_list("contextTypes", "contextType")
+                            && matches_list("tabIds", "tabId")
+                            && matches_list("windowIds", "windowId")
+                            && matches_list("frameIds", "frameId")
+                            && matches_list("documentUrls", "documentUrl")
+                            && matches_list("documentOrigins", "documentOrigin")
+                            && matches_list("contextIds", "contextId")
+                    })
+                    .collect();
                 reply(Ok(Value::Array(list)))
             }
             "management.getSelf" => {
@@ -1722,6 +1779,103 @@ impl Dispatcher {
             "management.get" => {
                 let id = call.arg(0).as_str().unwrap_or("");
                 reply(self.management_info(id).ok_or_else(|| ApiError::runtime(format!("Failed to find extension with id {id}."))))
+            }
+            "management.setEnabled" => {
+                let Some(id) = call.arg(0).as_str() else {
+                    return reply(Err(ApiError::invalid("id must be a string")));
+                };
+                let Some(enabled) = call.arg(1).as_bool() else {
+                    return reply(Err(ApiError::invalid("enabled must be a boolean")));
+                };
+                let changed = {
+                    let mut exts = self.extensions.borrow_mut();
+                    let Some(ext) = exts.get_mut(id) else {
+                        return reply(Err(ApiError::runtime(format!("Failed to find extension with id {id}."))));
+                    };
+                    let prev = ext.enabled;
+                    ext.enabled = enabled;
+                    prev != enabled
+                };
+                if changed && let Some(info) = self.management_info(id) {
+                    let event = if enabled { "management.onEnabled" } else { "management.onDisabled" };
+                    self.broadcast_permitted("management", event, vec![info]);
+                    self.ui_changed(id, "management");
+                }
+                let hc = ApiCall {
+                    extension_id: call.extension_id.clone(),
+                    function: "host.management.setEnabled".into(),
+                    args: vec![json!({ "id": id, "enabled": enabled })],
+                    caller: call.caller.clone(),
+                };
+                self.host.call_browser(&hc, Box::new(|_| {}));
+                reply(Ok(Value::Null))
+            }
+            "management.uninstall" => {
+                let Some(id) = call.arg(0).as_str() else {
+                    return reply(Err(ApiError::invalid("id must be a string")));
+                };
+                if !self.is_installed(id) {
+                    return reply(Err(ApiError::runtime(format!("Failed to find extension with id {id}."))));
+                }
+                let show_confirm = call.arg(1).get("showConfirmDialog").and_then(Value::as_bool).unwrap_or(false);
+                let id_owned = id.to_string();
+                self.host_call(
+                    call,
+                    "host.management.uninstall",
+                    json!({ "id": id, "showConfirmDialog": show_confirm }),
+                    reply,
+                    move |this, _| {
+                        this.uninstall(&id_owned);
+                        Ok(Value::Null)
+                    },
+                );
+            }
+            "management.uninstallSelf" => {
+                let show_confirm = call.arg(0).get("showConfirmDialog").and_then(Value::as_bool).unwrap_or(false);
+                let id_owned = call.extension_id.clone();
+                self.host_call(
+                    call,
+                    "host.management.uninstall",
+                    json!({ "id": id_owned, "showConfirmDialog": show_confirm, "self": true }),
+                    reply,
+                    move |this, _| {
+                        this.uninstall(&id_owned);
+                        Ok(Value::Null)
+                    },
+                );
+            }
+            "management.getPermissionWarningsById" => {
+                let Some(id) = call.arg(0).as_str() else {
+                    return reply(Err(ApiError::invalid("id must be a string")));
+                };
+                match self.with_extension(id, |e| crate::store::permission_warnings(&e.manifest)) {
+                    Some(w) => reply(Ok(json!(w))),
+                    None => reply(Err(ApiError::runtime(format!("Failed to find extension with id {id}.")))),
+                }
+            }
+            "management.getPermissionWarningsByManifest" => {
+                let Some(manifest_str) = call.arg(0).as_str() else {
+                    return reply(Err(ApiError::invalid("manifestStr must be a string")));
+                };
+                let parsed = crate::manifest::parse_manifest(manifest_str);
+                match parsed.manifest {
+                    Some(m) => reply(Ok(json!(crate::store::permission_warnings(&m)))),
+                    None => reply(Err(ApiError::runtime("Failed to parse manifest."))),
+                }
+            }
+            "management.install" => {
+                let opts = call.arg(0);
+                let Some(url) = opts.get("url").and_then(Value::as_str) else {
+                    return reply(Err(ApiError::invalid("options.url must be a string")));
+                };
+                if crate::match_pattern::split_url(url).is_none() {
+                    return reply(Err(ApiError::invalid("Invalid URL.")));
+                }
+                let mut req = json!({ "url": url });
+                if let Some(h) = opts.get("hash").and_then(Value::as_str) {
+                    req["hash"] = json!(h);
+                }
+                self.host_call(call, "host.management.install", req, reply, |_, v| Ok(v));
             }
             // Flushes the browser's cache of webRequest decisions; there is none to flush.
             "webRequest.handlerBehaviorChanged" => reply(Ok(Value::Null)),
@@ -2131,6 +2285,8 @@ mod tests {
         assert_eq!(injected["world"], "ISOLATED");
         assert!(injected["code"].as_str().unwrap().contains("(() => document.title)()"));
         assert!(injected["code"].as_str().unwrap().contains(injected["binding"].as_str().unwrap()));
+        // Top level of the isolated world, not a block: later injections see this code's top-level declarations.
+        assert!(!injected["code"].as_str().unwrap().starts_with('{'));
 
         b.navigate(10, "https://a.test/other");
         assert!(run(&d).is_ok(), "same origin keeps the grant");
@@ -2370,6 +2526,12 @@ mod tests {
         let (d, _) = setup(r#"{"manifest_version":3,"name":"Me","version":"2.0"}"#, &[]);
         assert_eq!(call(&d, "management.getSelf", vec![]).unwrap()["version"], "2.0");
         assert_eq!(call(&d, "management.getAll", vec![]).unwrap_err().kind, ErrorKind::PermissionDenied);
-        assert!(d.surface_for(ID).unwrap()["management"]["functions"].as_array().unwrap().iter().all(|f| f == "getSelf"));
+        assert!(
+            d.surface_for(ID).unwrap()["management"]["functions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| matches!(f.as_str(), Some("getSelf" | "uninstallSelf" | "getPermissionWarningsByManifest")))
+        );
     }
 }

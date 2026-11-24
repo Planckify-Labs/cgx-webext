@@ -6,7 +6,9 @@
 # Options:
 #   --demo     also load the demo extension (toolbar button, popup, badge, context menu, Alt+Shift+M shortcut)
 #   --trace    print every extension API call and its answer (WEBEXT_TRACE=1)
-#   --fresh    use a throwaway profile (nothing is kept, store installs included)
+#   --fresh    use a throwaway profile (nothing is kept, store installs included); it starts with Google as the search
+#              engine and without the first-run page (change the engine with --search=<name>)
+#   --search=<name>  search engine for --fresh, as Ladybird's settings name it (default: Google)
 #   --build    rebuild Ladybird first
 #
 # Any argument that is an unpacked extension directory or a .crx/.xpi/.zip file is loaded as an extension; everything else
@@ -21,15 +23,23 @@ set -euo pipefail
 
 cgx="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ladybird="${LADYBIRD_DIR:-$cgx/../ladybird}"
-binary="$ladybird/Build/release/bin/Ladybird"
+if [[ -x "$ladybird/Build/debug/bin/Ladybird" ]]; then
+    build_dir="$ladybird/Build/debug"
+else
+    build_dir="$ladybird/Build/release"
+fi
+binary="$build_dir/bin/Ladybird"
 
 args=()
 build=no
+fresh=no
+search_engine=Google
 for arg in "$@"; do
     case "$arg" in
         --demo) args+=(--load-extension "$cgx/Integration/ladybird/demo/toolbar-extension") ;;
         --trace) export WEBEXT_TRACE=1 ;;
-        --fresh) args+=(--temporary-profile) ;;
+        --fresh) fresh=yes ;;
+        --search=*) search_engine="${arg#--search=}" ;;
         --build) build=yes ;;
         -h|--help) sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)
@@ -43,12 +53,21 @@ for arg in "$@"; do
 done
 
 if [[ "$build" == yes ]]; then
-    ninja -C "$ladybird/Build/release" ladybird
+    ninja -C "$build_dir" ladybird
 fi
 if [[ ! -x "$binary" ]]; then
     echo "error: no Ladybird build at $binary" >&2
-    echo "       build it with: ninja -C $ladybird/Build/release ladybird   (or pass --build)" >&2
+    echo "       build it with: ninja -C $build_dir ladybird   (or pass --build)" >&2
     exit 1
 fi
 
-exec "$binary" "${args[@]}"
+if [[ "$fresh" == no ]]; then
+    exec "$binary" "${args[@]}"
+fi
+
+# A throwaway profile, seeded so that typing words in the address bar searches, and removed when Ladybird exits.
+profile="$(mktemp -d -t ladybird-fresh-XXXXXXXX)"
+trap 'rm -rf "$profile"' EXIT
+mkdir -p "$profile/config"
+printf '{"firstRunComplete":true,"searchEngine":{"engine":"%s"}}\n' "$search_engine" > "$profile/config/Settings.json"
+"$binary" --profile-path "$profile" "${args[@]}"

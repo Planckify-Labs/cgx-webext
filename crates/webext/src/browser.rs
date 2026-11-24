@@ -293,11 +293,22 @@ pub fn query(state: &BrowserState, q: &Value, current_window: Option<i64>, vis: 
         ),
         Some(_) => return Err("'url' must be a string or an array of strings".into()),
     };
-    let url_set = match &url_patterns {
-        Some(list) => Some(
-            MatchPatternSet::from_patterns(list.iter().map(String::as_str), MatchDialect::Chrome)
-                .map_err(|e| format!("Invalid url pattern '{}': {e}", list.join(", ")))?,
-        ),
+    // Match patterns cannot name extension pages, but both browsers let tabs.query find them by URL
+    // (`chrome-extension://<id>/page.html`, with `*` wildcards), so those are matched as globs instead.
+    let is_extension_page_pattern = |p: &str| p.starts_with("chrome-extension://") || p.starts_with("moz-extension://");
+    let url_filter = match &url_patterns {
+        Some(list) => {
+            let (extension_pages, web): (Vec<&String>, Vec<&String>) = list.iter().partition(|p| is_extension_page_pattern(p));
+            let web_set = if web.is_empty() {
+                None
+            } else {
+                Some(
+                    MatchPatternSet::from_patterns(web.iter().map(|p| p.as_str()), MatchDialect::Chrome)
+                        .map_err(|e| format!("Invalid url pattern '{}': {e}", list.join(", ")))?,
+                )
+            };
+            Some((web_set, extension_pages.into_iter().cloned().collect::<Vec<String>>()))
+        }
         None => None,
     };
     let title = q.get("title").and_then(Value::as_str);
@@ -354,10 +365,12 @@ pub fn query(state: &BrowserState, q: &Value, current_window: Option<i64>, vis: 
                 continue;
             }
             // Filtering by URL or title only finds tabs whose URL the extension may see, as in Chrome.
-            if let Some(set) = &url_set
-                && (!vis.sees_url(t) || !set.matches(&t.url))
-            {
-                continue;
+            if let Some((web_set, extension_pages)) = &url_filter {
+                let matches =
+                    web_set.as_ref().is_some_and(|set| set.matches(&t.url)) || extension_pages.iter().any(|p| glob_match(p, &t.url, false));
+                if !vis.sees_url(t) || !matches {
+                    continue;
+                }
             }
             if let Some(pattern) = title
                 && (!vis.sees_url(t) || !glob_match(pattern, &t.title, false))
@@ -694,6 +707,13 @@ mod tests {
         assert_eq!(ids(json!({"windowType": "popup"}), None), vec![20]);
         assert_eq!(ids(json!({"index": 1}), None), vec![11]);
         assert!(query(&s, &json!({"url": "not a pattern"}), None, &v).is_err());
+        // Extension pages are found by URL too (AdGuard looks for its own post-install page this way).
+        let mut with_page = two_windows();
+        with_page.windows[0].tabs[1].url = "chrome-extension://abc/pages/post-install.html".into();
+        let found = query(&with_page, &json!({"url": "chrome-extension://abc/pages/post-install.html"}), None, &v).unwrap();
+        assert_eq!(found.iter().map(|t| t["id"].as_i64().unwrap()).collect::<Vec<_>>(), vec![11]);
+        let mixed = query(&with_page, &json!({"url": ["chrome-extension://abc/*", "*://c.test/*"]}), None, &v).unwrap();
+        assert_eq!(mixed.iter().map(|t| t["id"].as_i64().unwrap()).collect::<Vec<_>>(), vec![11, 20]);
         // Without permission to see URLs, a URL filter matches nothing.
         let blind = Visibility { all_tabs: false, can_access: &|_, _| false, firefox: false };
         assert!(query(&s, &json!({"url": "<all_urls>"}), None, &blind).unwrap().is_empty());

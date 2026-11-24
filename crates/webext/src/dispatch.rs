@@ -9,7 +9,7 @@ use crate::loader::Files;
 use crate::manifest::Manifest;
 use crate::permissions::{PermissionRequest, PermissionState};
 use crate::registry::{Kind, Member, Registry, Status};
-use crate::storage::{Change, Quota, StorageArea, changes_to_json};
+use crate::storage::{AccessLevel, Change, Quota, StorageArea, changes_to_json};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,11 +21,21 @@ pub const EMITTED_EVENTS: &[&str] = &[
     "storage.local.onChanged",
     "storage.sync.onChanged",
     "storage.session.onChanged",
+    "storage.managed.onChanged",
     "alarms.onAlarm",
     "permissions.onAdded",
     "permissions.onRemoved",
     "runtime.onInstalled",
     "runtime.onStartup",
+    "runtime.onSuspend",
+    "runtime.onSuspendCanceled",
+    "runtime.onUpdateAvailable",
+    "runtime.onBrowserUpdateAvailable",
+    "runtime.onRestartRequired",
+    "runtime.onPerformanceWarning",
+    "runtime.onConnectExternal",
+    "runtime.onUserScriptMessage",
+    "runtime.onUserScriptConnect",
     // Delivered through the message bus as envelopes (see `bus`) rather than through `ExtensionHost::dispatch_event`.
     "runtime.onMessage",
     "runtime.onConnect",
@@ -48,8 +58,14 @@ pub const EMITTED_EVENTS: &[&str] = &[
     "action.onUserSettingsChanged",
     "pageAction.onClicked",
     "contextMenus.onClicked",
+    "contextMenus.onShown",
+    "contextMenus.onHidden",
     "commands.onCommand",
     "commands.onChanged",
+    "management.onInstalled",
+    "management.onUninstalled",
+    "management.onEnabled",
+    "management.onDisabled",
     // From the network stack and navigations (see `network`).
     "declarativeNetRequest.onRuleMatchedDebug",
     "webRequest.onBeforeRequest",
@@ -70,6 +86,50 @@ pub const EMITTED_EVENTS: &[&str] = &[
     "webNavigation.onReferenceFragmentUpdated",
     "webNavigation.onCreatedNavigationTarget",
     "webNavigation.onTabReplaced",
+    // Browser data APIs (see `data_api`).
+    "cookies.onChanged",
+    "bookmarks.onCreated",
+    "bookmarks.onRemoved",
+    "bookmarks.onChanged",
+    "bookmarks.onMoved",
+    "bookmarks.onChildrenReordered",
+    "bookmarks.onImportBegan",
+    "bookmarks.onImportEnded",
+    "history.onVisited",
+    "history.onVisitRemoved",
+    "history.onTitleChanged",
+    "downloads.onCreated",
+    "downloads.onErased",
+    "downloads.onChanged",
+    "downloads.onDeterminingFilename",
+    "sessions.onChanged",
+    // Platform, UI surfaces and settings APIs (see `platform_api`).
+    "notifications.onClicked",
+    "notifications.onClosed",
+    "notifications.onButtonClicked",
+    "notifications.onShown",
+    "notifications.onPermissionLevelChanged",
+    "idle.onStateChanged",
+    "omnibox.onInputStarted",
+    "omnibox.onInputChanged",
+    "omnibox.onInputEntered",
+    "omnibox.onInputCancelled",
+    "omnibox.onDeleteSuggestion",
+    "tabGroups.onCreated",
+    "tabGroups.onMoved",
+    "tabGroups.onRemoved",
+    "tabGroups.onUpdated",
+    "sidePanel.onOpened",
+    "theme.onUpdated",
+    "contextualIdentities.onCreated",
+    "contextualIdentities.onRemoved",
+    "contextualIdentities.onUpdated",
+    "fontSettings.onDefaultFixedFontSizeChanged",
+    "fontSettings.onDefaultFontSizeChanged",
+    "fontSettings.onFontChanged",
+    "fontSettings.onMinimumFontSizeChanged",
+    "captivePortal.onConnectivityAvailable",
+    "captivePortal.onStateChanged",
 ];
 
 /// Everything the core keeps for one installed extension.
@@ -101,6 +161,8 @@ pub struct Extension {
     pub dnr: crate::dnr::ExtensionRules,
     /// Install order: where two extensions disagree about a request, the one installed last wins.
     pub seq: u64,
+    /// Whether the extension is enabled (`management.setEnabled`).
+    pub enabled: bool,
 }
 
 pub struct InstallOptions {
@@ -123,10 +185,24 @@ pub struct Dispatcher {
     pub(crate) next_serial: Rc<std::cell::Cell<u64>>,
     /// `webRequest` listeners, requests waiting for them, and the frames of each tab; see `crate::network`.
     pub(crate) network: Rc<RefCell<crate::network::NetworkState>>,
+    /// Browser-data state (`bookmarks`, `downloads`, `sessions`); see `crate::data_api`.
+    pub(crate) data: Rc<RefCell<crate::data_api::DataState>>,
+    /// UI-surface, productivity, and settings state; see `crate::platform_api`.
+    pub(crate) platform: Rc<RefCell<crate::platform_api::PlatformState>>,
 }
 
 fn err(kind: ErrorKind, m: impl Into<String>) -> ApiError {
     ApiError::new(kind, m)
+}
+
+/// Every string in `value` with its `__MSG_*__` references replaced, as Firefox shows the manifest to extensions.
+fn localize_strings(value: &Value, i18n: &I18n) -> Value {
+    match value {
+        Value::String(text) if text.contains("__MSG_") => Value::String(i18n.localize(text)),
+        Value::Array(items) => Value::Array(items.iter().map(|v| localize_strings(v, i18n)).collect()),
+        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), localize_strings(v, i18n))).collect()),
+        other => other.clone(),
+    }
 }
 
 impl Dispatcher {
@@ -139,6 +215,8 @@ impl Dispatcher {
             browser: Rc::new(RefCell::new(crate::browser::BrowserState::default())),
             next_serial: Rc::new(std::cell::Cell::new(0)),
             network: Rc::new(RefCell::new(crate::network::NetworkState::default())),
+            data: Rc::new(RefCell::new(crate::data_api::DataState::default())),
+            platform: Rc::new(RefCell::new(crate::platform_api::PlatformState::default())),
         }
     }
 
@@ -190,6 +268,7 @@ impl Dispatcher {
         let ext = Extension {
             dnr,
             seq: self.next_serial.get(),
+            enabled: true,
             action,
             menus,
             commands,
@@ -199,7 +278,7 @@ impl Dispatcher {
             id: id.to_string(),
             local: load("local", local_quota),
             sync: load("sync", Quota::SYNC),
-            session: StorageArea::new(Quota::SESSION),
+            session: StorageArea::new(Quota::SESSION).with_access_level(AccessLevel::TrustedContexts),
             alarms: AlarmManager::default(),
             permissions,
             i18n,
@@ -213,6 +292,16 @@ impl Dispatcher {
         if has_rules {
             // The browser has to start reporting requests.
             self.host.dispatch_event(id, "__network.changed", vec![]);
+        }
+        if let Some(info) = self.management_info(id) {
+            let watchers: Vec<String> = self
+                .installed_ids()
+                .into_iter()
+                .filter(|other| other != id && self.with_extension(other, |e| e.permissions.has_api("management")).unwrap_or(false))
+                .collect();
+            for other in watchers {
+                self.host.dispatch_event(&other, "management.onInstalled", vec![info.clone()]);
+            }
         }
     }
 
@@ -230,8 +319,11 @@ impl Dispatcher {
         }
         let removed = removed.is_some();
         self.network_extension_removed(id);
+        self.data.borrow_mut().sessions.drop_extension(id);
+        self.platform.borrow_mut().drop_extension(id);
         if removed {
             self.host.dispatch_event(id, "__network.changed", vec![]);
+            self.broadcast_permitted("management", "management.onUninstalled", vec![json!(id)]);
         }
         let effects = self.bus.borrow_mut().drop_extension(id);
         self.run_effects(effects);
@@ -271,6 +363,9 @@ impl Dispatcher {
         let mut sender = json!({ "id": info.extension_id });
         if let Some(url) = &info.url {
             sender["url"] = json!(url);
+            // Chrome's MessageSender.origin; Bitwarden refuses connections from senders without one.
+            let origin = crate::browser::origin_of(url);
+            sender["origin"] = json!(if origin.is_empty() || origin.ends_with("://") { "null".to_string() } else { origin });
         }
         if let Some(frame) = info.frame_id {
             sender["frameId"] = json!(frame);
@@ -374,6 +469,37 @@ impl Dispatcher {
         Ok(json!({ "portId": port_id }))
     }
 
+    /// Whether an extension's own page may fetch a URL without CORS: in Chrome and Firefox, host permissions make those
+    /// origins the extension's for its own pages (not for its content scripts, which fetch as the page).
+    fn allows_fetch(&self, call: &ApiCall) -> Result<Value, ApiError> {
+        let ctx = self.calling_context(call)?;
+        if !matches!(ctx.kind, ContextKind::Background | ContextKind::ExtensionPage) {
+            return Ok(json!(false));
+        }
+        let url = call.args.first().and_then(Value::as_str).ok_or_else(|| ApiError::invalid("url must be a string"))?;
+        Ok(json!(self.with_extension(&ctx.extension_id, |e| e.permissions.has_host(url)).unwrap_or(false)))
+    }
+
+    /// `importScripts` in a background service worker (run as a page here): the text of one of the extension's own files,
+    /// which the browser then evaluates in that context. Only the extension's background and pages may ask, and only for
+    /// files of their own package.
+    fn read_script(&self, call: &ApiCall) -> Result<Value, ApiError> {
+        let ctx = self.calling_context(call)?;
+        if !matches!(ctx.kind, ContextKind::Background | ContextKind::ExtensionPage) {
+            return Err(ApiError::runtime("importScripts is only available to the extension's own pages"));
+        }
+        let path = call.args.first().and_then(Value::as_str).ok_or_else(|| ApiError::invalid("path must be a string"))?;
+        let path = path.split(['?', '#']).next().unwrap_or("").trim_start_matches('/');
+        if path.split('/').any(|segment| segment == "..") {
+            return Err(ApiError::invalid("path must stay inside the extension"));
+        }
+        let text = self
+            .with_extension(&ctx.extension_id, |e| e.files.get(path).map(|bytes| String::from_utf8_lossy(bytes).into_owned()))
+            .flatten()
+            .ok_or_else(|| ApiError::runtime(format!("importScripts: the extension has no file '{path}'")))?;
+        Ok(Value::String(text))
+    }
+
     /// Calls the shim makes to answer the bus: `__bus.accept`, `__bus.post`, `__bus.disconnect`, `__bus.reply`. They are not
     /// part of the extension-visible API, so they bypass the registry; the bus checks that the caller is an end of the port
     /// or an addressee of the message.
@@ -440,8 +566,10 @@ impl Dispatcher {
         Some(json!({
             "id": ext.id,
             "baseUrl": ext.base_url,
-            "manifest": ext.manifest.raw,
-            "uiLanguage": ext.i18n.ui_locale(),
+            // Firefox's runtime.getManifest() answers with __MSG_*__ strings localized; Chrome's leaves them as written.
+            "manifest": if crate::browser_api::is_firefox(ext) { localize_strings(&ext.manifest.raw, &ext.i18n) } else { ext.manifest.raw.clone() },
+            // i18n.getUILanguage answers a language tag ("en-US"); @@ui_locale keeps Chrome's "en_US" form.
+            "uiLanguage": ext.i18n.ui_locale().replace('_', "-"),
             // Chrome-style extensions get only `chrome`, Firefox-style ones `browser` too: extensions test `typeof browser`.
             "dialect": if crate::browser_api::is_firefox(ext) { "firefox" } else { "chrome" },
             "syncFunctions": self.registry.sync_functions(),
@@ -544,8 +672,17 @@ impl Dispatcher {
         if call.function.starts_with("__webRequest.") {
             return self.web_request_internal(&call, reply);
         }
+        if call.function.starts_with("__setting.") || call.function.starts_with("__omnibox.") {
+            return self.platform_internal(&call, reply);
+        }
         if call.function == "__contentScripts.unregister" {
             return reply(self.unregister_content_script(&call));
+        }
+        if call.function == "__runtime.readScript" {
+            return reply(self.read_script(&call));
+        }
+        if call.function == "__permissions.allowsFetch" {
+            return reply(self.allows_fetch(&call));
         }
         match self.route(&call) {
             Err(e) => reply(Err(e)),
@@ -600,6 +737,11 @@ impl Dispatcher {
             }),
             "i18n.getMessage" => self.i18n_get_message(call),
             "i18n.getUILanguage" => Ok(json!(self.host.ui_locale())),
+            "i18n.detectLanguage" => match call.arg(0).as_str() {
+                Some(text) => Ok(crate::i18n::detect_language(text)),
+                None => Err(ApiError::invalid("text must be a string")),
+            },
+            "i18n.getPreferredSystemLanguages" => Ok(json!([self.host.ui_locale()])),
             "permissions.contains" => self.permissions_contains(call),
             "permissions.getAll" => self.with_ext(call, |e| Ok(e.permissions.all().to_json())),
             "permissions.remove" => self.permissions_remove(call),
@@ -610,6 +752,8 @@ impl Dispatcher {
             "tabs.connect" => self.connect(call, true),
             n if crate::browser_api::handles(n) => return self.browser_api(member, call, reply),
             n if crate::network::handles(n) => return self.network_api(member, call, reply),
+            n if crate::data_api::handles(n) => return self.data_api(member, call, reply),
+            n if crate::platform_api::handles(n) => return self.platform_api(member, call, reply),
             n if n.starts_with("storage.") => self.storage(member, call),
             n if n.starts_with("alarms.") => self.alarms(member, call),
             other => Err(err(ErrorKind::Unhandled, format!("registry marks '{other}' as handled by the core, but no handler exists"))),
@@ -650,14 +794,28 @@ impl Dispatcher {
         let parts: Vec<&str> = member.full_name.split('.').collect();
         let [_, area_name, op] = parts[..] else { return Err(err(ErrorKind::Unhandled, member.full_name.clone())) };
 
-        if area_name == "session" && call.caller.context == ContextKind::ContentScript {
-            return Err(err(ErrorKind::PermissionDenied, "Access to storage is not allowed from this context."));
-        }
         if area_name == "managed" {
             return match op {
                 "get" => Ok(json!({})),
+                "getBytesInUse" => Ok(json!(0)),
                 _ => Err(err(ErrorKind::Unhandled, member.full_name.clone())),
             };
+        }
+        if op == "setAccessLevel" {
+            if call.caller.context == ContextKind::ContentScript {
+                return Err(err(ErrorKind::PermissionDenied, "Context cannot set the storage access level."));
+            }
+            let level = AccessLevel::parse(call.arg(0)).map_err(ApiError::invalid)?;
+            return self.with_ext_mut(call, |e| {
+                let area = match area_name {
+                    "local" => &mut e.local,
+                    "sync" => &mut e.sync,
+                    "session" => &mut e.session,
+                    _ => return Err(err(ErrorKind::Unhandled, member.full_name.clone())),
+                };
+                area.set_access_level(level);
+                Ok(Value::Null)
+            });
         }
 
         let mut changes: Vec<Change> = vec![];
@@ -668,6 +826,9 @@ impl Dispatcher {
                 "session" => &mut e.session,
                 _ => return Err(err(ErrorKind::Unhandled, member.full_name.clone())),
             };
+            if call.caller.context == ContextKind::ContentScript && !area.allows_untrusted() {
+                return Err(err(ErrorKind::PermissionDenied, "Access to storage is not allowed from this context."));
+            }
             let map = |e: crate::storage::StorageError| ApiError::runtime(e.to_string());
             match op {
                 "get" => area.get(call.arg(0)).map_err(map),
@@ -982,14 +1143,14 @@ mod tests {
         let (d, _) = setup(M3);
         assert_eq!(kind(call(&d, "nope.nothing", vec![])), ErrorKind::UnknownApi);
         // Unsupported APIs report that before anything else, which is more useful than a permission error.
-        assert_eq!(kind(call(&d, "bookmarks.onCreated", vec![])), ErrorKind::NotAvailable);
-        assert_eq!(kind(call(&d, "downloads.download", vec![])), ErrorKind::NotAvailable);
+        assert_eq!(kind(call(&d, "proxy.onRequest", vec![])), ErrorKind::NotAvailable);
+        assert_eq!(kind(call(&d, "gcm.register", vec![])), ErrorKind::NotAvailable);
         let (no_perm, _) = setup(r#"{"manifest_version":3,"name":"x","version":"1"}"#);
         assert_eq!(kind(call(&no_perm, "alarms.create", vec![json!({"delayInMinutes": 1})])), ErrorKind::PermissionDenied);
         assert_eq!(kind(call(&no_perm, "storage.local.get", vec![])), ErrorKind::PermissionDenied);
         // Planned APIs fail clearly rather than silently succeeding.
-        let (d2, _) = setup(r#"{"manifest_version":3,"name":"x","version":"1","permissions":["downloads"]}"#);
-        assert_eq!(kind(call(&d2, "downloads.download", vec![])), ErrorKind::NotAvailable);
+        let (d2, _) = setup(r#"{"manifest_version":3,"name":"x","version":"1","permissions":["gcm"]}"#);
+        assert_eq!(kind(call(&d2, "gcm.register", vec![])), ErrorKind::NotAvailable);
         // MV2-only API in an MV3 extension.
         assert_eq!(kind(call(&d, "tabs.executeScript", vec![])), ErrorKind::NotAvailable);
         // Events are not callable.
@@ -1197,8 +1358,8 @@ mod tests {
     fn delegated_calls_are_routed_with_canonical_names() {
         let (d, host) =
             setup(r#"{"manifest_version":2,"name":"x","version":"1","permissions":["cookies","contextMenus"],"browser_action":{}}"#);
-        assert_eq!(call(&d, "cookies.getAll", vec![json!({})]).unwrap(), json!({"routed": "cookies.getAll"}));
-        assert_eq!(host.browser_calls.borrow().len(), 1);
+        assert_eq!(call(&d, "cookies.getAll", vec![json!({})]).unwrap(), json!([]));
+        assert_eq!(host.browser_calls.borrow().as_slice(), ["host.cookies.getAll"]);
         // Aliases reach the same state as the canonical names, which the core keeps itself.
         call(&d, "browserAction.setTitle", vec![json!({"title": "T"})]).unwrap();
         assert_eq!(call(&d, "action.getTitle", vec![json!({})]).unwrap(), json!("T"));
@@ -1293,6 +1454,59 @@ mod tests {
     }
 
     #[test]
+    fn import_scripts_reads_only_own_files_for_extension_pages() {
+        let host = Rc::new(MockHost::default());
+        let d = Dispatcher::new(host.clone(), Registry::builtin());
+        let m =
+            crate::manifest::parse_manifest(r#"{"manifest_version":3,"name":"x","version":"1","background":{"service_worker":"sw.js"}}"#)
+                .manifest
+                .unwrap();
+        let mut files = Files::new();
+        files.insert("lib/sdk.js", b"self.SDK = 1;".to_vec());
+        d.install(ID, m, InstallOptions { base_url: format!("chrome-extension://{ID}/"), locales: vec![], files });
+        register(&d, BG, ContextKind::Background, None, None);
+        register(&d, CS, ContextKind::ContentScript, Some(5), Some(0));
+        let read = |ctx, kind, path: &str| call_ctx(&d, ctx, kind, "__runtime.readScript", vec![json!(path)]);
+        assert_eq!(read(BG, ContextKind::Background, "/lib/sdk.js").unwrap(), json!("self.SDK = 1;"));
+        assert_eq!(read(BG, ContextKind::Background, "lib/sdk.js?v=2").unwrap(), json!("self.SDK = 1;"));
+        assert!(read(BG, ContextKind::Background, "missing.js").is_err());
+        assert!(read(BG, ContextKind::Background, "../lib/sdk.js").is_err());
+        assert!(read(CS, ContextKind::ContentScript, "lib/sdk.js").is_err(), "content scripts cannot importScripts");
+    }
+
+    #[test]
+    fn firefox_get_manifest_is_localized() {
+        let install = |manifest: &str, base_url: &str| {
+            let host = Rc::new(MockHost::default());
+            let d = Dispatcher::new(host, Registry::builtin());
+            let m = crate::manifest::parse_manifest(manifest).manifest.unwrap();
+            let locales = vec![("en".to_string(), r#"{"extName":{"message":"Violentmonkey"}}"#.to_string())];
+            d.install(ID, m, InstallOptions { base_url: base_url.into(), locales, files: Files::new() });
+            d.init_data_for(ID).unwrap()["manifest"]["name"].clone()
+        };
+        let firefox = install(
+            r#"{"manifest_version":2,"name":"__MSG_extName__","version":"1","default_locale":"en","browser_specific_settings":{"gecko":{"id":"vm@x"}}}"#,
+            "moz-extension://u/",
+        );
+        assert_eq!(firefox, "Violentmonkey");
+        let chrome =
+            install(r#"{"manifest_version":3,"name":"__MSG_extName__","version":"1","default_locale":"en"}"#, "chrome-extension://x/");
+        assert_eq!(chrome, "__MSG_extName__");
+    }
+
+    #[test]
+    fn extension_pages_fetch_permitted_hosts_without_cors() {
+        let (d, _) = setup(r#"{"manifest_version":3,"name":"x","version":"1","host_permissions":["https://api.example.com/*"]}"#);
+        register(&d, BG, ContextKind::Background, None, None);
+        register(&d, CS, ContextKind::ContentScript, Some(5), Some(0));
+        let allows = |ctx, kind, url: &str| call_ctx(&d, ctx, kind, "__permissions.allowsFetch", vec![json!(url)]).unwrap();
+        assert_eq!(allows(BG, ContextKind::Background, "https://api.example.com/v1/config"), json!(true));
+        assert_eq!(allows(BG, ContextKind::Background, "https://other.example.com/"), json!(false));
+        // Content scripts fetch as the page they run in.
+        assert_eq!(allows(CS, ContextKind::ContentScript, "https://api.example.com/v1/config"), json!(false));
+    }
+
+    #[test]
     fn port_from_content_script_to_background_end_to_end() {
         let (d, host) = messaging_setup();
         let opened =
@@ -1309,6 +1523,7 @@ mod tests {
         assert_eq!(connect["sender"]["id"], ID);
         assert_eq!(connect["sender"]["tab"], json!({"id": 5}));
         assert_eq!(connect["sender"]["frameId"], 0);
+        assert_eq!(connect["sender"]["origin"], "https://example.test");
         assert_eq!(delivered_to(&host, POPUP).len(), 1);
         assert!(delivered_to(&host, CS_SUB).is_empty(), "other content scripts never see runtime.connect");
 

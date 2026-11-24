@@ -218,6 +218,17 @@ test('constants are defined where the namespace is visible', () => {
   assert.equal(limited.chrome.tabs, undefined);
 });
 
+test('enum objects use the browsers\' key names', () => {
+  const { api } = make();
+  assert.equal(api.chrome.runtime.PlatformOs.MAC, 'mac');
+  assert.equal(api.chrome.runtime.PlatformArch.X86_64, 'x86-64');
+  assert.equal(api.chrome.tabs.TabStatus.COMPLETE, 'complete');
+  assert.equal(api.chrome.windows.WindowState.LOCKED_FULLSCREEN, 'locked-fullscreen');
+  assert.equal(api.chrome.tabs.ZoomSettingsScope.PER_ORIGIN, 'per-origin');
+  // Enums are frozen.
+  assert.throws(() => { 'use strict'; api.chrome.runtime.PlatformOs.MAC = 'x'; }, TypeError);
+});
+
 test('contextMenus.create returns the id at once, names unnamed items, and runs onclick in its own context', async () => {
   const { api, calls } = make();
   const clicks = [];
@@ -313,4 +324,23 @@ test('declarativeNetRequest constants are there', () => {
   const { api } = make();
   assert.equal(api.chrome.declarativeNetRequest.MAX_NUMBER_OF_DYNAMIC_RULES, 30000);
   assert.equal(api.browser.declarativeNetRequest.SESSION_RULESET_ID, '_session');
+  assert.equal(api.chrome.tabGroups.TAB_GROUP_ID_NONE, -1);
+  assert.equal(api.browser.sessions.MAX_SESSION_RESULTS, 25);
+});
+
+test('privacy and browserSettings expose BrowserSetting objects and omnibox passes suggest', async () => {
+  const { api, calls } = make();
+  assert.equal(typeof api.chrome.privacy.network.networkPredictionEnabled.get, 'function');
+  assert.equal(typeof api.browser.browserSettings.cacheEnabled.set, 'function');
+  await api.browser.privacy.network.networkPredictionEnabled.set({ value: false });
+  assert.deepEqual(calls.at(-1), { name: '__setting.set', args: ['privacy.network.networkPredictionEnabled', { value: false }] });
+  await api.browser.browserSettings.colorManagement.mode.get({});
+  assert.deepEqual(calls.at(-1), { name: '__setting.get', args: ['browserSettings.colorManagement.mode', {}] });
+
+  api.chrome.omnibox.onInputChanged.addListener((text, suggest) => {
+    suggest([{ content: `${text}-1`, description: 'First' }]);
+  });
+  api.dispatchEvent('omnibox.onInputChanged', ['hello']);
+  assert.deepEqual(calls.at(-1), { name: '__omnibox.suggest', args: [[{ content: 'hello-1', description: 'First' }]] });
+  assert.equal(api.chrome.extension.lastError, undefined);
 });

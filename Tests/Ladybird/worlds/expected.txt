@@ -1,0 +1,87 @@
+# Every check that scripts/ladybird-worlds-test.sh requires to be reported as ok (a check that never reports fails).
+# iso.*      the content script's isolated world: what it sees, and what the page's tampering cannot reach
+# page.*     the page's view of the extensions: it sees the DOM changes, not the extensions' globals or API
+# main.*     scripts with world: "MAIN"
+# inject.*   scripting.executeScript, in both worlds
+# register.* scripting.registerContentScripts, in both worlds
+# module.*   modules imported by a content script (isolated world) or by the page (page world)
+# firefox.*  wrappedJSObject, cloneInto, exportFunction, createObjectIn, tabs.executeScript
+# csp.*      a page with a strict CSP and Trusted Types
+# ext.*      two extensions in one document
+# lifetime.* worlds torn down by navigations and by removing a frame
+csp.eval-allowed-in-content-script
+csp.extension-script-ran-in-page
+csp.inner-html-allowed-in-content-script
+csp.page-keeps-its-restrictions
+csp.script-url-allowed-in-content-script
+csp.timer-string-allowed
+ext.b-has-its-own-world
+ext.other-extensions-world-invisible
+firefox.cloneInto-and-exportFunction
+firefox.cloneInto-result-is-page-object
+firefox.cloneInto-structured-types
+firefox.cloneInto-without-cloneFunctions-refuses-functions
+firefox.createObjectIn
+firefox.element-wrappedJSObject-shows-page-expando
+firefox.exportFunction-callable-from-page
+firefox.has-browser-and-helpers
+firefox.page-prototypes-are-the-pages
+firefox.tabs-executeScript
+firefox.window-wrappedJSObject-is-page-window
+inject.awaits-promise-results
+inject.files
+inject.isolated-globals-persist
+inject.isolated-is-the-content-script-world
+inject.main-is-the-page-world
+iso.add-event-listener-works
+iso.array-push-not-tampered
+iso.custom-event-from-cs-reaches-page-listeners
+iso.document-start
+iso.dom-changes-shared
+iso.dom-parser-and-html
+iso.eval-and-function
+iso.expando-not-shared
+iso.fetch
+iso.frame-world
+iso.has-api-as-global
+iso.instanceof-dom-classes
+iso.json-stringify-not-tampered
+iso.messaging
+iso.mutation-observer
+iso.page-event-received
+iso.page-global-invisible
+iso.promise
+iso.query-selector-not-tampered
+iso.request-animation-frame
+iso.same-world-across-scripts
+iso.setinterval
+iso.settimeout
+iso.storage
+iso.timer-string-handler-runs-in-this-world
+iso.window-self-references
+iso.wrapper-identity
+lifetime.loop-0
+lifetime.loop-1
+lifetime.loop-2
+lifetime.loop-3
+lifetime.loop-4
+lifetime.loop-5
+lifetime.loop-6
+lifetime.loop-7
+lifetime.loop-8
+lifetime.survived-navigations
+main.sees-page-tampering
+main.world-main
+module.dynamic-import-sees-chrome
+module.page-import-has-no-chrome
+module.same-instance-on-reimport
+page.cs-expando-invisible
+page.cs-global-invisible
+page.ext-b-global-invisible
+page.no-extension-api
+page.sees-cs-dom-change
+page.sees-cs-listener-effects
+page.tamper-counters-own-calls-only
+register.isolated-world
+register.main-world
+page.cs-errors-not-reported-to-page

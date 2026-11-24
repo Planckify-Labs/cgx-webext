@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><title>worlds: loop</title>
+<body>
+<script>
+// Many navigations in a row: every one tears down the isolated world that the content script made for the document.
+const n = +location.search.slice(3);
+setTimeout(() => { location = n >= 8 ? '/done.html' : '/loop.html?n=' + (n + 1); }, 150);
+</script>
+</body>

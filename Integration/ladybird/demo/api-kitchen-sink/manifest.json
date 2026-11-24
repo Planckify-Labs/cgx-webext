@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "WebExt API Coverage Test",
+  "version": "1.0",
+  "description": "Interactive end-to-end test suite for cookies, bookmarks, history, browsingData, downloads, sessions, notifications, tabGroups, userScripts, offscreen, sidePanel, privacy, fontSettings, publicSuffix, i18n, and more.",
+  "action": {
+    "default_title": "WebExt API Coverage Test",
+    "default_popup": "popup.html"
+  },
+  "permissions": [
+    "storage",
+    "tabs",
+    "cookies",
+    "bookmarks",
+    "history",
+    "topSites",
+    "browsingData",
+    "downloads",
+    "sessions",
+    "notifications",
+    "idle",
+    "search",
+    "tabGroups",
+    "userScripts",
+    "offscreen",
+    "sidePanel",
+    "power",
+    "fontSettings",
+    "privacy",
+    "management",
+    "identity",
+    "tts",
+    "system.cpu"
+  ],
+  "host_permissions": ["https://example.com/*"],
+  "background": { "service_worker": "background.js" }
+}

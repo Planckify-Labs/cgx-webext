@@ -306,7 +306,7 @@ impl Dispatcher {
                 "versionName": m.version_name,
                 "mayDisable": true,
                 "mayEnable": true,
-                "enabled": true,
+                "enabled": e.enabled,
                 "isApp": false,
                 "type": "extension",
                 "installType": "normal",
@@ -335,8 +335,8 @@ impl Dispatcher {
                 "type": "extension",
                 "name": localized(&e.i18n, &e.manifest.name),
                 "description": localized(&e.i18n, &e.manifest.description),
-                "isEnabled": true,
-                "isActive": true,
+                "isEnabled": e.enabled,
+                "isActive": e.enabled,
                 "canUninstall": true,
             })
         })

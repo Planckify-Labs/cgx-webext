@@ -578,7 +578,7 @@ pub unsafe extern "C" fn webext_content_script_bundles(
     .unwrap_or_else(|_| empty())
 }
 
-/// The content-script programs for a document (see `Dispatcher::content_script_programs`): `[{ "extensionId", "program" }]`.
+/// The content-script programs for a document (see `Dispatcher::content_script_programs`): `[{ "extensionId", "world", "program" }]`.
 /// Never null.
 ///
 /// # Safety

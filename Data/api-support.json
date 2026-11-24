@@ -1,7 +1,45 @@
 {
   "_comment": "Curated extension API surface. 'status' is OUR implementation status and is maintained by hand: implemented (core handles it, tested), partial (works with documented limits), delegated (core validates and routes to the host browser, which must implement it), planned (not yet), unsupported (will not be supported). A test enforces that implemented/partial entries have a real handler and that delegated entries reach the host. Chrome/Firefox AVAILABILITY (engines, only) is synced from MDN browser-compat-data by Tools/sync_registry.py and checked by Tools/verify_registry.py; Chrome-only APIs that BCD omits (sidePanel, offscreen, ...) are maintained by hand. 'storage' is modelled by hand with nested areas.",
   "version": 1,
-  "sync_functions": ["runtime.getManifest", "runtime.getURL", "extension.getURL", "i18n.getMessage", "i18n.getUILanguage"],
+  "sync_functions": ["runtime.getManifest", "runtime.getURL", "extension.getURL", "i18n.getMessage", "i18n.getUILanguage", "publicSuffix.getDomain", "publicSuffix.getKnownSuffix", "publicSuffix.isKnownSuffix"],
+  "awaiting_browser": {
+    "downloads.download": "Ladybird does not start downloads for extensions yet (host.downloads.download).",
+    "downloads.open": "Opening a downloaded file is not wired to Ladybird yet (host.downloads.open).",
+    "downloads.show": "Showing a download in the file manager is not wired to Ladybird yet (host.downloads.show).",
+    "downloads.showDefaultFolder": "Opening the downloads folder is not wired to Ladybird yet (host.downloads.showDefaultFolder).",
+    "downloads.removeFile": "Deleting a downloaded file is not wired to Ladybird yet (host.downloads.removeFile).",
+    "downloads.getFileIcon": "Ladybird has no file icons for downloads yet (host.downloads.getFileIcon).",
+    "tts.speak": "Ladybird has no speech output for extensions yet (host.tts.speak).",
+    "tts.stop": "Needs speech output in Ladybird (host.tts.stop).",
+    "tts.pause": "Needs speech output in Ladybird (host.tts.pause).",
+    "tts.resume": "Needs speech output in Ladybird (host.tts.resume).",
+    "tts.getVoices": "Needs the system's voices from Ladybird (host.tts.getVoices).",
+    "notifications.create": "Accepted, but Ladybird does not show the notification yet (host.notifications.show).",
+    "notifications.update": "Accepted, but Ladybird does not show the notification yet (host.notifications.show).",
+    "notifications.clear": "Ladybird does not show notifications yet, so there is nothing to clear (host.notifications.clear).",
+    "offscreen.createDocument": "Accepted, but Ladybird does not create the offscreen document yet (host.offscreen.create).",
+    "offscreen.closeDocument": "Needs offscreen documents in Ladybird (host.offscreen.close).",
+    "identity.getAuthToken": "Ladybird has no account sign-in for extensions (host.identity.getAuthToken).",
+    "identity.getProfileUserInfo": "Ladybird has no signed-in browser profile (host.identity.getProfileUserInfo).",
+    "identity.launchWebAuthFlow": "The sign-in window for extensions is not wired to Ladybird yet (host.identity.launchWebAuthFlow).",
+    "management.install": "Installing a theme or extension by URL is not wired to Ladybird yet (host.management.install).",
+    "management.setEnabled": "Ladybird cannot disable extensions yet, only remove them (host.management.setEnabled).",
+    "sidePanel.open": "Ladybird has no side panel for extensions yet (host.sidePanel.open).",
+    "power.requestKeepAwake": "Accepted, but Ladybird does not keep the system awake yet (host.power.setLevel).",
+    "power.releaseKeepAwake": "Accepted, but Ladybird does not keep the system awake yet (host.power.setLevel).",
+    "system.memory.getInfo": "Ladybird does not report system memory yet (host.system.memory).",
+    "system.storage.getInfo": "Ladybird does not report storage devices yet (host.system.storage).",
+    "system.display.getInfo": "Ladybird does not report displays yet (host.system.display).",
+    "runtime.sendNativeMessage": "Ladybird has no native messaging hosts yet (host.runtime.sendNativeMessage).",
+    "runtime.restart": "Restarting the browser for an extension is not wired to Ladybird yet (host.runtime.restart).",
+    "commands.openShortcutSettings": "Ladybird has no shortcut settings page yet (host.commands.openShortcutSettings).",
+    "omnibox.onInputChanged": "The event fires, but Ladybird does not show the extension's suggestions in the address bar yet (host.omnibox.suggest).",
+    "find.find": "Find in page is not wired to Ladybird yet (host.find.find).",
+    "find.highlightResults": "Find in page is not wired to Ladybird yet (host.find.highlightResults).",
+    "find.removeHighlighting": "Find in page is not wired to Ladybird yet (host.find.removeHighlighting).",
+    "clipboard.setImageData": "Copying images to the clipboard is not wired to Ladybird yet (host.clipboard.setImageData).",
+    "dns.resolve": "Ladybird does not resolve host names for extensions yet (host.dns.resolve)."
+  },
   "aliases": {
     "browserAction": "action",
     "menus": "contextMenus"
@@ -11,13 +49,12 @@
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "implemented": ["getManifest", "getURL", "connect", "sendMessage", "openOptionsPage", "reload", "getPlatformInfo", "setUninstallURL", "getBrowserInfo", "getContexts", "getVersion"],
-        "planned": ["connectNative", "sendNativeMessage", "getBackgroundPage", "requestUpdateCheck", "restart", "getPackageDirectoryEntry", "getDocumentId", "getFrameId"]
+        "implemented": ["getManifest", "getURL", "connect", "sendMessage", "openOptionsPage", "reload", "getPlatformInfo", "setUninstallURL", "getBrowserInfo", "getContexts", "getVersion", "sendNativeMessage", "requestUpdateCheck", "restart"],
+        "planned": ["connectNative", "getBackgroundPage", "getPackageDirectoryEntry", "getDocumentId", "getFrameId"]
       },
       "events": {
-        "implemented": ["onInstalled", "onStartup", "onMessage", "onConnect"],
-        "delegated": ["onMessageExternal"],
-        "planned": ["onConnectExternal", "onSuspend", "onSuspendCanceled", "onUpdateAvailable", "onUserScriptMessage", "onBrowserUpdateAvailable", "onPerformanceWarning", "onRestartRequired", "onUserScriptConnect"]
+        "implemented": ["onInstalled", "onStartup", "onMessage", "onConnect", "onConnectExternal", "onSuspend", "onSuspendCanceled", "onUpdateAvailable", "onUserScriptMessage", "onBrowserUpdateAvailable", "onPerformanceWarning", "onRestartRequired", "onUserScriptConnect"],
+        "delegated": ["onMessageExternal"]
       },
       "properties": {
         "implemented": ["id", "lastError"]
@@ -43,7 +80,7 @@
         "partial": ["isAllowedIncognitoAccess", "isAllowedFileSchemeAccess"]
       },
       "properties": {
-        "planned": ["lastError"],
+        "implemented": ["lastError"],
         "partial": ["inIncognitoContext"]
       },
       "mv": {
@@ -64,13 +101,11 @@
       "permission": "storage",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "implemented": ["local.get", "local.set", "local.remove", "local.clear", "local.getBytesInUse", "local.getKeys", "session.get", "session.set", "session.remove", "session.clear", "session.getBytesInUse", "session.getKeys"],
-        "partial": ["sync.get", "sync.set", "sync.remove", "sync.clear", "sync.getBytesInUse", "sync.getKeys", "managed.get"],
-        "planned": ["local.setAccessLevel", "session.setAccessLevel", "sync.setAccessLevel", "managed.getBytesInUse"]
+        "implemented": ["local.get", "local.set", "local.remove", "local.clear", "local.getBytesInUse", "local.getKeys", "local.setAccessLevel", "session.get", "session.set", "session.remove", "session.clear", "session.getBytesInUse", "session.getKeys", "session.setAccessLevel", "sync.setAccessLevel"],
+        "partial": ["sync.get", "sync.set", "sync.remove", "sync.clear", "sync.getBytesInUse", "sync.getKeys", "managed.get", "managed.getBytesInUse"]
       },
       "events": {
-        "implemented": ["onChanged", "local.onChanged", "sync.onChanged", "session.onChanged"],
-        "planned": ["managed.onChanged"]
+        "implemented": ["onChanged", "local.onChanged", "sync.onChanged", "session.onChanged", "managed.onChanged"]
       },
       "properties": {
         "implemented": ["sync.QUOTA_BYTES", "sync.QUOTA_BYTES_PER_ITEM", "sync.MAX_ITEMS", "sync.MAX_WRITE_OPERATIONS_PER_HOUR", "sync.MAX_WRITE_OPERATIONS_PER_MINUTE", "local.QUOTA_BYTES", "session.QUOTA_BYTES"]
@@ -84,15 +119,15 @@
       },
       "notes": {
         "sync.*": "Backed by local storage with sync quotas; there is no cross-device sync.",
-        "managed.get": "Always returns an empty object until enterprise policy is supported."
+        "managed.get": "Always returns an empty object until enterprise policy is supported.",
+        "managed.getBytesInUse": "Always returns 0 until enterprise policy is supported."
       }
     },
     "i18n": {
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "implemented": ["getMessage", "getUILanguage", "getAcceptLanguages"],
-        "planned": ["detectLanguage", "getPreferredSystemLanguages"]
+        "implemented": ["getMessage", "getUILanguage", "getAcceptLanguages", "detectLanguage", "getPreferredSystemLanguages"]
       },
       "only": {
         "getPreferredSystemLanguages": "firefox"
@@ -112,8 +147,7 @@
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "implemented": ["contains", "getAll", "request", "remove"],
-        "planned": ["addHostAccessRequest", "removeHostAccessRequest"]
+        "implemented": ["contains", "getAll", "request", "remove", "addHostAccessRequest", "removeHostAccessRequest"]
       },
       "events": {
         "implemented": ["onAdded", "onRemoved"]
@@ -127,8 +161,7 @@
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["group", "ungroup", "toggleReaderMode", "saveAsPDF", "print", "printPreview", "getZoomSettings", "setZoomSettings", "warmup", "hide", "show", "captureTab", "moveInSuccession"],
-        "implemented": ["connect", "sendMessage", "query", "get", "getCurrent", "create", "update", "remove", "reload", "duplicate", "goBack", "goForward", "move", "highlight", "captureVisibleTab", "detectLanguage", "discard", "getZoom", "setZoom", "executeScript", "insertCSS", "removeCSS"]
+        "implemented": ["connect", "sendMessage", "query", "get", "getCurrent", "create", "update", "remove", "reload", "duplicate", "goBack", "goForward", "move", "highlight", "captureVisibleTab", "detectLanguage", "discard", "getZoom", "setZoom", "executeScript", "insertCSS", "removeCSS", "group", "ungroup", "toggleReaderMode", "saveAsPDF", "print", "printPreview", "getZoomSettings", "setZoomSettings", "warmup", "hide", "show", "captureTab", "moveInSuccession"]
       },
       "events": {
         "delegated": ["onReplaced"],
@@ -141,7 +174,6 @@
         "captureTab": "firefox",
         "hide": "firefox",
         "moveInSuccession": "firefox",
-        "onReplaced": "chrome",
         "print": "firefox",
         "printPreview": "firefox",
         "saveAsPDF": "firefox",
@@ -218,12 +250,10 @@
       "permission": "contextMenus",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["overrideContext", "getTargetElement"],
-        "implemented": ["create", "update", "remove", "removeAll", "refresh"]
+        "implemented": ["create", "update", "remove", "removeAll", "refresh", "overrideContext", "getTargetElement"]
       },
       "events": {
-        "planned": ["onShown", "onHidden"],
-        "implemented": ["onClicked"]
+        "implemented": ["onClicked", "onShown", "onHidden"]
       },
       "only": {
         "getTargetElement": "firefox",
@@ -240,8 +270,7 @@
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["openShortcutSettings"],
-        "implemented": ["getAll", "update", "reset"]
+        "implemented": ["getAll", "update", "reset", "openShortcutSettings"]
       },
       "events": {
         "implemented": ["onCommand", "onChanged"]
@@ -257,11 +286,11 @@
       "permission": "cookies",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "delegated": ["get", "getAll", "set", "remove", "getAllCookieStores"],
+        "implemented": ["get", "getAll", "set", "remove", "getAllCookieStores"],
         "planned": ["sameSiteStatus"]
       },
       "events": {
-        "delegated": ["onChanged"]
+        "implemented": ["onChanged"]
       }
     },
     "webNavigation": {
@@ -326,10 +355,10 @@
       "permission": "downloads",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["download", "search", "pause", "resume", "cancel", "open", "show", "showDefaultFolder", "erase", "removeFile", "acceptDanger", "drag", "setShelfEnabled", "setUiOptions", "getFileIcon"]
+        "implemented": ["download", "search", "pause", "resume", "cancel", "open", "show", "showDefaultFolder", "erase", "removeFile", "acceptDanger", "drag", "setShelfEnabled", "setUiOptions", "getFileIcon"]
       },
       "events": {
-        "planned": ["onCreated", "onErased", "onChanged", "onDeterminingFilename"]
+        "implemented": ["onCreated", "onErased", "onChanged", "onDeterminingFilename"]
       },
       "only": {
         "acceptDanger": "chrome",
@@ -343,10 +372,10 @@
       "permission": "notifications",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["create", "update", "clear", "getAll", "getPermissionLevel"]
+        "implemented": ["create", "update", "clear", "getAll", "getPermissionLevel"]
       },
       "events": {
-        "planned": ["onClicked", "onClosed", "onButtonClicked", "onShown", "onPermissionLevelChanged"]
+        "implemented": ["onClicked", "onClosed", "onButtonClicked", "onShown", "onPermissionLevelChanged"]
       },
       "only": {
         "getPermissionLevel": "chrome",
@@ -360,10 +389,10 @@
       "permission": "bookmarks",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["get", "getChildren", "getRecent", "getTree", "getSubTree", "search", "create", "move", "update", "remove", "removeTree"]
+        "implemented": ["get", "getChildren", "getRecent", "getTree", "getSubTree", "search", "create", "move", "update", "remove", "removeTree"]
       },
       "events": {
-        "planned": ["onCreated", "onRemoved", "onChanged", "onMoved", "onChildrenReordered", "onImportBegan", "onImportEnded"]
+        "implemented": ["onCreated", "onRemoved", "onChanged", "onMoved", "onChildrenReordered", "onImportBegan", "onImportEnded"]
       },
       "only": {
         "onChildrenReordered": "chrome",
@@ -375,10 +404,10 @@
       "permission": "history",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["search", "getVisits", "addUrl", "deleteUrl", "deleteRange", "deleteAll"]
+        "implemented": ["search", "getVisits", "addUrl", "deleteUrl", "deleteRange", "deleteAll"]
       },
       "events": {
-        "planned": ["onVisited", "onVisitRemoved", "onTitleChanged"]
+        "implemented": ["onVisited", "onVisitRemoved", "onTitleChanged"]
       },
       "only": {
         "onTitleChanged": "firefox"
@@ -388,10 +417,10 @@
       "permission": "sessions",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["getRecentlyClosed", "restore", "getDevices", "forgetClosedTab", "forgetClosedWindow", "getTabValue", "getWindowValue", "removeTabValue", "removeWindowValue", "setTabValue", "setWindowValue"]
+        "implemented": ["getRecentlyClosed", "restore", "getDevices", "forgetClosedTab", "forgetClosedWindow", "getTabValue", "getWindowValue", "removeTabValue", "removeWindowValue", "setTabValue", "setWindowValue"]
       },
       "events": {
-        "planned": ["onChanged"]
+        "implemented": ["onChanged"]
       },
       "only": {
         "forgetClosedTab": "firefox",
@@ -408,35 +437,34 @@
       "permission": "topSites",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["get"]
+        "implemented": ["get"]
       }
     },
     "browsingData": {
       "permission": "browsingData",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["remove", "removeCache", "removeCookies", "removeDownloads", "removeFormData", "removeHistory", "removeLocalStorage", "removePasswords", "removeIndexedDB", "settings", "removePluginData"]
+        "implemented": ["remove", "removeCache", "removeCookies", "removeDownloads", "removeFormData", "removeHistory", "removeLocalStorage", "removePasswords", "removeIndexedDB", "settings", "removePluginData"]
       }
     },
     "idle": {
       "permission": "idle",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["queryState", "setDetectionInterval"]
+        "implemented": ["queryState", "setDetectionInterval"]
       },
       "events": {
-        "planned": ["onStateChanged"]
+        "implemented": ["onStateChanged"]
       }
     },
     "management": {
       "permission": "management",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["setEnabled", "uninstall", "uninstallSelf", "getPermissionWarningsById", "getPermissionWarningsByManifest", "install"],
-        "implemented": ["getSelf", "getAll", "get"]
+        "implemented": ["getSelf", "getAll", "get", "setEnabled", "uninstall", "uninstallSelf", "getPermissionWarningsById", "getPermissionWarningsByManifest", "install"]
       },
       "events": {
-        "planned": ["onInstalled", "onUninstalled", "onEnabled", "onDisabled"]
+        "implemented": ["onInstalled", "onUninstalled", "onEnabled", "onDisabled"]
       },
       "only": {
         "getPermissionWarningsById": "chrome",
@@ -445,14 +473,16 @@
         "uninstall": "chrome"
       },
       "perm_overrides": {
-        "getSelf": null
+        "getSelf": null,
+        "uninstallSelf": null,
+        "getPermissionWarningsByManifest": null
       }
     },
     "search": {
       "permission": "search",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["query", "search", "get"]
+        "implemented": ["query", "search", "get"]
       },
       "only": {
         "get": "firefox",
@@ -463,7 +493,7 @@
       "permission": "identity",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["launchWebAuthFlow", "getRedirectURL", "getAuthToken", "getProfileUserInfo", "removeCachedAuthToken", "clearAllCachedAuthTokens"]
+        "implemented": ["launchWebAuthFlow", "getRedirectURL", "getAuthToken", "getProfileUserInfo", "removeCachedAuthToken", "clearAllCachedAuthTokens"]
       },
       "only": {
         "clearAllCachedAuthTokens": "chrome",
@@ -476,41 +506,41 @@
       "permission": "offscreen",
       "engines": ["chrome"],
       "functions": {
-        "planned": ["createDocument", "closeDocument", "hasDocument"]
+        "implemented": ["createDocument", "closeDocument", "hasDocument"]
       }
     },
     "sidePanel": {
       "permission": "sidePanel",
       "engines": ["chrome"],
       "functions": {
-        "planned": ["setOptions", "getOptions", "setPanelBehavior", "getPanelBehavior", "open", "getLayout"]
+        "implemented": ["setOptions", "getOptions", "setPanelBehavior", "getPanelBehavior", "open", "getLayout"]
       },
       "events": {
-        "planned": ["onOpened"]
+        "implemented": ["onOpened"]
       }
     },
     "sidebarAction": {
       "permission": null,
       "engines": ["firefox"],
       "functions": {
-        "planned": ["setTitle", "getTitle", "setIcon", "setPanel", "getPanel", "open", "close", "toggle", "isOpen"]
+        "implemented": ["setTitle", "getTitle", "setIcon", "setPanel", "getPanel", "open", "close", "toggle", "isOpen"]
       }
     },
     "theme": {
       "permission": "theme",
       "engines": ["firefox"],
       "functions": {
-        "planned": ["getCurrent", "update", "reset"]
+        "implemented": ["getCurrent", "update", "reset"]
       },
       "events": {
-        "planned": ["onUpdated"]
+        "implemented": ["onUpdated"]
       }
     },
     "userScripts": {
       "permission": "userScripts",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["register", "unregister", "getScripts", "update", "configureWorld", "getWorldConfigurations", "resetWorldConfiguration", "execute"]
+        "implemented": ["register", "unregister", "getScripts", "update", "configureWorld", "getWorldConfigurations", "resetWorldConfiguration", "execute"]
       }
     },
     "proxy": {
@@ -533,7 +563,7 @@
         "planned": []
       },
       "properties": {
-        "planned": ["network", "services", "websites"]
+        "implemented": ["network", "services", "websites"]
       }
     },
     "contentSettings": {
@@ -547,17 +577,17 @@
       "permission": "tts",
       "engines": ["chrome"],
       "functions": {
-        "planned": ["speak", "stop", "pause", "resume", "isSpeaking", "getVoices"]
+        "implemented": ["speak", "stop", "pause", "resume", "isSpeaking", "getVoices"]
       }
     },
     "tabGroups": {
       "permission": "tabGroups",
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["get", "move", "query", "update"]
+        "implemented": ["get", "move", "query", "update"]
       },
       "events": {
-        "planned": ["onCreated", "onMoved", "onRemoved", "onUpdated"]
+        "implemented": ["onCreated", "onMoved", "onRemoved", "onUpdated"]
       }
     },
     "tabCapture": {
@@ -585,20 +615,20 @@
       "permission": "fontSettings",
       "engines": ["chrome"],
       "functions": {
-        "planned": ["clearDefaultFixedFontSize", "clearDefaultFontSize", "clearFont", "clearMinimumFontSize", "getDefaultFixedFontSize", "getDefaultFontSize", "getFont", "getFontList", "getMinimumFontSize", "setDefaultFixedFontSize", "setDefaultFontSize", "setFont", "setMinimumFontSize"]
+        "implemented": ["clearDefaultFixedFontSize", "clearDefaultFontSize", "clearFont", "clearMinimumFontSize", "getDefaultFixedFontSize", "getDefaultFontSize", "getFont", "getFontList", "getMinimumFontSize", "setDefaultFixedFontSize", "setDefaultFontSize", "setFont", "setMinimumFontSize"]
       },
       "events": {
-        "planned": ["onDefaultFixedFontSizeChanged", "onDefaultFontSizeChanged", "onFontChanged", "onMinimumFontSizeChanged"]
+        "implemented": ["onDefaultFixedFontSizeChanged", "onDefaultFontSizeChanged", "onFontChanged", "onMinimumFontSizeChanged"]
       }
     },
     "omnibox": {
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["setDefaultSuggestion"]
+        "implemented": ["setDefaultSuggestion"]
       },
       "events": {
-        "planned": ["onInputStarted", "onInputChanged", "onInputEntered", "onInputCancelled", "onDeleteSuggestion"]
+        "implemented": ["onInputStarted", "onInputChanged", "onInputEntered", "onInputCancelled", "onDeleteSuggestion"]
       }
     },
     "declarativeContent": {
@@ -622,14 +652,14 @@
       "permission": "dns",
       "engines": ["firefox"],
       "functions": {
-        "planned": ["resolve"]
+        "implemented": ["resolve"]
       }
     },
     "find": {
       "permission": "find",
       "engines": ["firefox"],
       "functions": {
-        "planned": ["find", "highlightResults", "removeHighlighting"]
+        "implemented": ["find", "highlightResults", "removeHighlighting"]
       }
     },
     "browserSettings": {
@@ -639,34 +669,34 @@
         "planned": []
       },
       "properties": {
-        "planned": ["allowPopupsForUserEvents", "cacheEnabled", "closeTabsByDoubleClick", "colorManagement", "contextMenuShowEvent", "ftpProtocolEnabled", "homepageOverride", "imageAnimationBehavior", "newTabPageOverride", "newTabPosition", "openBookmarksInNewTabs", "openSearchResultsInNewTabs", "openUrlbarResultsInNewTabs", "overrideContentColorScheme", "overrideDocumentColors", "tlsVersionRestrictionConfig", "useDocumentFonts", "verticalTabs", "webNotificationsDisabled", "zoomFullPage", "zoomSiteSpecific"]
+        "implemented": ["allowPopupsForUserEvents", "cacheEnabled", "closeTabsByDoubleClick", "colorManagement", "contextMenuShowEvent", "ftpProtocolEnabled", "homepageOverride", "imageAnimationBehavior", "newTabPageOverride", "newTabPosition", "openBookmarksInNewTabs", "openSearchResultsInNewTabs", "openUrlbarResultsInNewTabs", "overrideContentColorScheme", "overrideDocumentColors", "tlsVersionRestrictionConfig", "useDocumentFonts", "verticalTabs", "webNotificationsDisabled", "zoomFullPage", "zoomSiteSpecific"]
       }
     },
     "contextualIdentities": {
       "permission": "contextualIdentities",
       "engines": ["firefox"],
       "functions": {
-        "planned": ["get", "query", "create", "update", "remove", "getSupportedColors", "getSupportedIcons", "move"]
+        "implemented": ["get", "query", "create", "update", "remove", "getSupportedColors", "getSupportedIcons", "move"]
       },
       "events": {
-        "planned": ["onCreated", "onRemoved", "onUpdated"]
+        "implemented": ["onCreated", "onRemoved", "onUpdated"]
       }
     },
     "captivePortal": {
       "permission": "captivePortal",
       "engines": ["firefox"],
       "functions": {
-        "planned": ["getState", "getLastChecked", "canonicalURL"]
+        "implemented": ["getState", "getLastChecked", "canonicalURL"]
       },
       "events": {
-        "planned": ["onConnectivityAvailable", "onStateChanged"]
+        "implemented": ["onConnectivityAvailable", "onStateChanged"]
       }
     },
     "system": {
       "permission": null,
       "engines": ["chrome"],
       "functions": {
-        "planned": ["cpu.getInfo", "memory.getInfo", "storage.getInfo", "display.getInfo"]
+        "implemented": ["cpu.getInfo", "memory.getInfo", "storage.getInfo", "display.getInfo"]
       },
       "perm_overrides": {
         "cpu.getInfo": "system.cpu",
@@ -679,7 +709,7 @@
       "permission": "power",
       "engines": ["chrome"],
       "functions": {
-        "planned": ["requestKeepAwake", "releaseKeepAwake"]
+        "implemented": ["requestKeepAwake", "releaseKeepAwake"]
       }
     },
     "gcm": {
@@ -694,7 +724,7 @@
       "permission": "clipboardWrite",
       "engines": ["firefox"],
       "functions": {
-        "planned": ["setImageData"]
+        "implemented": ["setImageData"]
       }
     },
     "contentScripts": {
@@ -722,7 +752,7 @@
       "permission": null,
       "engines": ["chrome", "firefox"],
       "functions": {
-        "planned": ["getDomain", "getKnownSuffix", "isKnownSuffix"]
+        "implemented": ["getDomain", "getKnownSuffix", "isKnownSuffix"]
       }
     }
   }

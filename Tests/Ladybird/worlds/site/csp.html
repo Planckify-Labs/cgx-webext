@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>worlds: csp</title>
+<body>
+<div id="shared">shared</div>
+<script>
+const report = (c, ok, d) => fetch('/report?c=' + encodeURIComponent(c) + '&ok=' + (ok ? 1 : 0) + '&d=' + encodeURIComponent(String(d === undefined ? '' : d).slice(0, 200)));
+// The page's own policy still holds: no eval, no untrusted HTML, no script URL into an extension without a policy.
+setTimeout(() => {
+  let evalBlocked = false, htmlBlocked = false, urlBlocked = false;
+  try { eval('1'); } catch (e) { evalBlocked = true; }
+  try { document.createElement('div').innerHTML = '<b>x</b>'; } catch (e) { htmlBlocked = true; }
+  try { document.createElement('script').src = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/x.js'; } catch (e) { urlBlocked = true; }
+  report('csp.page-keeps-its-restrictions', evalBlocked && htmlBlocked && urlBlocked, `eval=${evalBlocked} html=${htmlBlocked} url=${urlBlocked}`);
+  report('csp.extension-script-ran-in-page', window.injectedByExt === 'yes', String(window.injectedByExt));
+  setTimeout(() => { location = '/loop.html?n=0'; }, 500);
+}, 2500);
+</script>
+</body>

@@ -7,11 +7,12 @@ How much of the Chrome and Firefox extension API surface is covered. Numbers cou
 - **core**: provided by this crate and covered by tests (`implemented` + `partial`).
 - **+host**: also counts `delegated` members, which the crate validates and routes but the embedding browser must implement.
 - **planned**: not available yet; calling it fails with a clear error.
+- **Ladybird today**: core members that also work end to end in Ladybird. The rest of the core members need a browser-side primitive the integration does not have yet; they are listed under [Waiting for the browser](#waiting-for-the-browser).
 
-| Browser | Members | core | +host | planned |
-|---|---:|---:|---:|---:|
-| Chrome | 399 | 47.1% | 49.1% | 203 |
-| Firefox | 417 | 45.6% | 47.2% | 220 |
+| Browser | Members | core | +host | Ladybird today | planned |
+|---|---:|---:|---:|---:|---:|
+| Chrome | 399 | 93.5% | 94.0% | 86.5% | 24 |
+| Firefox | 418 | 94.3% | 94.7% | 89.5% | 22 |
 
 ## By namespace
 
@@ -21,62 +22,103 @@ Each cell is `core/+host/total` members available in that browser.
 |---|---:|---:|---:|
 | `action` | 18/18/18 | 18/18/18 | 0 |
 | `alarms` | 6/6/6 | 6/6/6 | 0 |
-| `bookmarks` | 0/0/18 | 0/0/15 | 18 |
-| `browserSettings` | – | 0/0/21 | – |
-| `browsingData` | 0/0/11 | 0/0/11 | 11 |
-| `captivePortal` | – | 0/0/5 | – |
-| `clipboard` | – | 0/0/1 | – |
-| `commands` | 2/2/2 | 5/5/6 | 0 |
+| `bookmarks` | 18/18/18 | 15/15/15 | 0 |
+| `browserSettings` | – | 21/21/21 | – |
+| `browsingData` | 11/11/11 | 11/11/11 | 0 |
+| `captivePortal` | – | 5/5/5 | – |
+| `clipboard` | – | 1/1/1 | – |
+| `commands` | 2/2/2 | 6/6/6 | 0 |
 | `contentScripts` | – | 1/1/1 | – |
 | `contentSettings` | – | – | – |
-| `contextMenus` | 5/5/5 | 6/6/10 | 0 |
-| `contextualIdentities` | – | 0/0/11 | – |
-| `cookies` | 0/6/7 | 0/6/7 | 1 |
+| `contextMenus` | 5/5/5 | 10/10/10 | 0 |
+| `contextualIdentities` | – | 11/11/11 | – |
+| `cookies` | 6/6/7 | 6/6/7 | 1 |
 | `declarativeContent` | – | – | – |
 | `declarativeNetRequest` | 14/14/14 | 11/11/11 | 0 |
 | `desktopCapture` | 0/0/2 | – | 2 |
 | `devtools` | 0/0/7 | 0/0/7 | 7 |
-| `dns` | – | 0/0/1 | – |
+| `dns` | – | 1/1/1 | – |
 | `dom` | 0/0/1 | – | 1 |
-| `downloads` | 0/0/19 | 0/0/14 | 19 |
-| `extension` | 4/4/8 | 4/4/7 | 4 |
-| `find` | – | 0/0/3 | – |
-| `fontSettings` | 0/0/17 | – | 17 |
+| `downloads` | 19/19/19 | 14/14/14 | 0 |
+| `extension` | 5/5/8 | 5/5/7 | 3 |
+| `find` | – | 3/3/3 | – |
+| `fontSettings` | 17/17/17 | – | 0 |
 | `gcm` | 0/0/3 | – | 3 |
-| `history` | 0/0/8 | 0/0/9 | 8 |
-| `i18n` | 3/3/4 | 3/3/5 | 1 |
-| `identity` | 0/0/6 | 0/0/2 | 6 |
-| `idle` | 0/0/3 | 0/0/3 | 3 |
-| `management` | 3/3/12 | 3/3/10 | 9 |
-| `notifications` | 0/0/9 | 0/0/6 | 9 |
-| `offscreen` | 0/0/3 | – | 3 |
-| `omnibox` | 0/0/6 | 0/0/6 | 6 |
+| `history` | 8/8/8 | 9/9/9 | 0 |
+| `i18n` | 4/4/4 | 5/5/5 | 0 |
+| `identity` | 6/6/6 | 2/2/2 | 0 |
+| `idle` | 3/3/3 | 3/3/3 | 0 |
+| `management` | 12/12/12 | 10/10/10 | 0 |
+| `notifications` | 9/9/9 | 6/6/6 | 0 |
+| `offscreen` | 3/3/3 | – | 0 |
+| `omnibox` | 6/6/6 | 6/6/6 | 0 |
 | `pageAction` | 8/8/8 | 10/10/10 | 0 |
 | `pageCapture` | 0/0/1 | – | 1 |
-| `permissions` | 6/6/8 | 6/6/6 | 2 |
+| `permissions` | 8/8/8 | 6/6/6 | 0 |
 | `pkcs11` | – | 0/0/4 | – |
-| `power` | 0/0/2 | – | 2 |
-| `privacy` | 0/0/3 | 0/0/3 | 3 |
+| `power` | 2/2/2 | – | 0 |
+| `privacy` | 3/3/3 | 3/3/3 | 0 |
 | `proxy` | – | 0/0/3 | – |
-| `publicSuffix` | 0/0/3 | 0/0/3 | 3 |
-| `runtime` | 16/17/30 | 17/18/31 | 13 |
+| `publicSuffix` | 3/3/3 | 3/3/3 | 0 |
+| `runtime` | 26/27/30 | 26/27/31 | 3 |
 | `scripting` | 7/7/7 | 7/7/7 | 0 |
-| `search` | 0/0/1 | 0/0/3 | 1 |
-| `sessions` | 0/0/4 | 0/0/12 | 4 |
-| `sidePanel` | 0/0/7 | – | 7 |
-| `sidebarAction` | – | 0/0/9 | – |
-| `storage` | 30/30/35 | 27/27/30 | 5 |
-| `system` | 0/0/4 | – | 4 |
+| `search` | 1/1/1 | 3/3/3 | 0 |
+| `sessions` | 4/4/4 | 12/12/12 | 0 |
+| `sidePanel` | 7/7/7 | – | 0 |
+| `sidebarAction` | – | 9/9/9 | – |
+| `storage` | 35/35/35 | 30/30/30 | 0 |
+| `system` | 4/4/4 | – | 0 |
 | `tabCapture` | 0/0/3 | – | 3 |
-| `tabGroups` | 0/0/8 | 0/0/8 | 8 |
-| `tabs` | 32/33/37 | 32/32/44 | 4 |
-| `theme` | – | 0/0/4 | – |
-| `topSites` | 0/0/1 | 0/0/1 | 1 |
-| `tts` | 0/0/6 | – | 6 |
-| `userScripts` | 0/0/8 | 0/0/8 | 8 |
+| `tabGroups` | 8/8/8 | 8/8/8 | 0 |
+| `tabs` | 36/37/37 | 44/45/45 | 0 |
+| `theme` | – | 4/4/4 | – |
+| `topSites` | 1/1/1 | 1/1/1 | 0 |
+| `tts` | 6/6/6 | – | 0 |
+| `userScripts` | 8/8/8 | 8/8/8 | 0 |
 | `webNavigation` | 11/11/11 | 11/11/11 | 0 |
 | `webRequest` | 10/10/10 | 11/11/12 | 0 |
 | `windows` | 13/13/13 | 12/12/12 | 0 |
+
+## Waiting for the browser
+
+The core provides these, but Ladybird does not have the browser-side part yet, so calling them fails or has no visible effect:
+
+- `downloads.download`: Ladybird does not start downloads for extensions yet (host.downloads.download).
+- `downloads.open`: Opening a downloaded file is not wired to Ladybird yet (host.downloads.open).
+- `downloads.show`: Showing a download in the file manager is not wired to Ladybird yet (host.downloads.show).
+- `downloads.showDefaultFolder`: Opening the downloads folder is not wired to Ladybird yet (host.downloads.showDefaultFolder).
+- `downloads.removeFile`: Deleting a downloaded file is not wired to Ladybird yet (host.downloads.removeFile).
+- `downloads.getFileIcon`: Ladybird has no file icons for downloads yet (host.downloads.getFileIcon).
+- `tts.speak`: Ladybird has no speech output for extensions yet (host.tts.speak).
+- `tts.stop`: Needs speech output in Ladybird (host.tts.stop).
+- `tts.pause`: Needs speech output in Ladybird (host.tts.pause).
+- `tts.resume`: Needs speech output in Ladybird (host.tts.resume).
+- `tts.getVoices`: Needs the system's voices from Ladybird (host.tts.getVoices).
+- `notifications.create`: Accepted, but Ladybird does not show the notification yet (host.notifications.show).
+- `notifications.update`: Accepted, but Ladybird does not show the notification yet (host.notifications.show).
+- `notifications.clear`: Ladybird does not show notifications yet, so there is nothing to clear (host.notifications.clear).
+- `offscreen.createDocument`: Accepted, but Ladybird does not create the offscreen document yet (host.offscreen.create).
+- `offscreen.closeDocument`: Needs offscreen documents in Ladybird (host.offscreen.close).
+- `identity.getAuthToken`: Ladybird has no account sign-in for extensions (host.identity.getAuthToken).
+- `identity.getProfileUserInfo`: Ladybird has no signed-in browser profile (host.identity.getProfileUserInfo).
+- `identity.launchWebAuthFlow`: The sign-in window for extensions is not wired to Ladybird yet (host.identity.launchWebAuthFlow).
+- `management.install`: Installing a theme or extension by URL is not wired to Ladybird yet (host.management.install).
+- `management.setEnabled`: Ladybird cannot disable extensions yet, only remove them (host.management.setEnabled).
+- `sidePanel.open`: Ladybird has no side panel for extensions yet (host.sidePanel.open).
+- `power.requestKeepAwake`: Accepted, but Ladybird does not keep the system awake yet (host.power.setLevel).
+- `power.releaseKeepAwake`: Accepted, but Ladybird does not keep the system awake yet (host.power.setLevel).
+- `system.memory.getInfo`: Ladybird does not report system memory yet (host.system.memory).
+- `system.storage.getInfo`: Ladybird does not report storage devices yet (host.system.storage).
+- `system.display.getInfo`: Ladybird does not report displays yet (host.system.display).
+- `runtime.sendNativeMessage`: Ladybird has no native messaging hosts yet (host.runtime.sendNativeMessage).
+- `runtime.restart`: Restarting the browser for an extension is not wired to Ladybird yet (host.runtime.restart).
+- `commands.openShortcutSettings`: Ladybird has no shortcut settings page yet (host.commands.openShortcutSettings).
+- `omnibox.onInputChanged`: The event fires, but Ladybird does not show the extension's suggestions in the address bar yet (host.omnibox.suggest).
+- `find.find`: Find in page is not wired to Ladybird yet (host.find.find).
+- `find.highlightResults`: Find in page is not wired to Ladybird yet (host.find.highlightResults).
+- `find.removeHighlighting`: Find in page is not wired to Ladybird yet (host.find.removeHighlighting).
+- `clipboard.setImageData`: Copying images to the clipboard is not wired to Ladybird yet (host.clipboard.setImageData).
+- `dns.resolve`: Ladybird does not resolve host names for extensions yet (host.dns.resolve).
 
 Status notes (partial members):
 
@@ -84,6 +126,7 @@ Status notes (partial members):
 - `extension.isAllowedFileSchemeAccess`: Always false: extensions cannot be allowed on file:// pages yet.
 - `extension.inIncognitoContext`: Always false: extensions do not run in private windows yet.
 - `storage.managed.get`: Always returns an empty object until enterprise policy is supported.
+- `storage.managed.getBytesInUse`: Always returns 0 until enterprise policy is supported.
 - `webNavigation.onErrorOccurred`: Ladybird does not report failed navigations to extensions yet, so the event never fires.
 - `webNavigation.onCreatedNavigationTarget`: Ladybird does not report which navigation opened a tab yet, so the event never fires.
 - `webNavigation.onTabReplaced`: Ladybird never replaces a tab by another (no prerendering), so the event never fires.

@@ -143,13 +143,14 @@ These work, tested in this build:
 
 These do not work yet:
 
-- `cookies`, and the browser-data APIs (`downloads`, `bookmarks`, `history`, ...).
+- The members listed under "Waiting for the browser" in [COVERAGE.md](COVERAGE.md): `downloads`, `tts`, notifications
+  (accepted but not shown), offscreen documents, `identity` sign-in, `sidePanel.open`, `system.*` and a few more.
+- `navigator.serviceWorker` in extension pages, which MV3 extensions such as Stylus use to reach their background.
 - Requests made by workers and WebSocket connections are not shown to extensions yet, so an ad blocker does not filter
   them. Requests of pages and frames are: uBlock Origin and uBlock Origin Lite block ads (see
   [COMPATIBILITY.md](COMPATIBILITY.md)); `scripts/ladybird-network-test.sh` checks the network APIs in your build.
-- Content scripts share the page's JavaScript world (no isolated worlds). Extensions whose content scripts `import()`
-  modules that use `chrome.*`, such as Ambient light for YouTube, do not work, and a hostile page can tamper with content
-  scripts. Try extensions on sites you trust.
+- Content scripts run in isolated worlds, but without Firefox's Xray wrappers: a content script that reads objects of the
+  page sees what the page put there. See the limits in specs/webextensions-full-api/tasks.md.
 - Dark Reader shows its popup but does not darken pages yet.
 - No extensions manager page; remove extensions from the extensions panel. They cannot be disabled, only removed.
 - Signatures of `.crx`/`.xpi` files are not verified; store installs are checked against the id or hash the store gave.

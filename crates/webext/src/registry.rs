@@ -147,6 +147,9 @@ pub struct Registry {
     aliases: HashMap<String, String>,
     namespaces: Vec<String>,
     sync_functions: Vec<String>,
+    /// Members the core provides but whose effect needs a browser-side primitive the Ladybird integration does not have yet
+    /// (`awaiting_browser` in the registry): `(member, what is missing)`.
+    awaiting_browser: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -186,7 +189,12 @@ impl Registry {
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
             .unwrap_or_default();
-        let mut reg = Registry { members: vec![], index: HashMap::new(), aliases, namespaces: vec![], sync_functions };
+        let awaiting_browser: Vec<(String, String)> = root
+            .get("awaiting_browser")
+            .and_then(Value::as_object)
+            .map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect())
+            .unwrap_or_default();
+        let mut reg = Registry { members: vec![], index: HashMap::new(), aliases, namespaces: vec![], sync_functions, awaiting_browser };
         for (ns_name, ns) in namespaces {
             reg.namespaces.push(ns_name.clone());
             let ns_permission = ns.get("permission").and_then(Value::as_str).map(String::from);
@@ -268,6 +276,12 @@ impl Registry {
                 _ => return Err(err(format!("sync function '{f}' must be an implemented or partial function"))),
             }
         }
+        for (name, what) in &reg.awaiting_browser {
+            match reg.index.get(name).map(|&i| &reg.members[i]) {
+                Some(m) if m.status.handled_by_core() && !what.is_empty() => {}
+                _ => return Err(err(format!("awaiting_browser '{name}' must be an implemented or partial member, with a reason"))),
+            }
+        }
         Ok(reg)
     }
 
@@ -275,6 +289,18 @@ impl Registry {
     /// JavaScript shim a synchronous way to call these.
     pub fn sync_functions(&self) -> &[String] {
         &self.sync_functions
+    }
+
+    /// Members the core provides whose effect still needs the browser (see the field), with what is missing.
+    pub fn awaiting_browser(&self) -> &[(String, String)] {
+        &self.awaiting_browser
+    }
+
+    /// Members of `engine` that work end to end in Ladybird today: provided by the core and not awaiting the browser.
+    pub fn working_in_browser(&self, engine: Engine) -> usize {
+        self.members_in(engine)
+            .filter(|m| m.status.handled_by_core() && !self.awaiting_browser.iter().any(|(n, _)| *n == m.full_name))
+            .count()
     }
 
     pub fn members(&self) -> &[Member] {
@@ -372,6 +398,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn awaiting_browser_lowers_what_works_in_ladybird() {
+        let reg = Registry::builtin();
+        assert!(reg.awaiting_browser().iter().any(|(m, _)| m == "tts.speak"));
+        for engine in [Engine::Chrome, Engine::Firefox] {
+            let c = reg.counts(engine);
+            assert!(reg.working_in_browser(engine) < c.implemented + c.partial);
+        }
+        // An entry must name a member the core provides.
+        let bad = BUILTIN_REGISTRY_JSON.replacen("\"awaiting_browser\": {", "\"awaiting_browser\": {\"tts.nope\": \"x\",", 1);
+        assert!(Registry::from_json(&bad).is_err());
+    }
+
+    #[test]
     fn builtin_registry_parses_and_is_consistent() {
         let r = Registry::builtin();
         assert!(r.members().len() > 400, "registry unexpectedly small: {}", r.members().len());
@@ -440,8 +479,8 @@ mod tests {
         let mv2 = r.surface_json(2, Engine::Chrome, &|_| true);
         assert!(mv2["tabs"]["functions"].as_array().unwrap().iter().any(|f| f == "executeScript"));
         // What is not available yet is undefined, so that feature detection takes the fallback; events stay attachable.
-        assert!(mv2.get("publicSuffix").is_none() && mv2.get("privacy").is_none());
-        assert!(mv2["downloads"]["functions"].as_array().unwrap().is_empty());
+        assert!(mv2.get("gcm").is_none() && mv2.get("dom").is_none());
+        assert!(mv2.get("tabCapture").is_none());
         assert!(mv2["webRequest"]["events"].as_array().unwrap().iter().any(|e| e == "onBeforeRequest"));
         // Each browser's own members only.
         assert!(mv2.get("sidebarAction").is_none());

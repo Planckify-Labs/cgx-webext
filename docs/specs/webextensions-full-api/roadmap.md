@@ -1,16 +1,42 @@
 # Roadmap to 100%: every Chrome and Firefox extension API in Ladybird
 
-State in November 2026 (`docs/COVERAGE.md`): **Chrome 47.1%** of 399 members, **Firefox 45.6%** of 417. Phase 2 (network)
-is done except `proxy`, `dns` and `webRequest.filterResponseData`.
+State on 24 November 2026 (`docs/COVERAGE.md`): the core provides **Chrome 93.5%** of 399 members and **Firefox 94.3%**
+of 418; **86.5% (Chrome) and 89.5% (Firefox) work end to end in Ladybird today**. The gap is 36 members whose browser-side
+primitive Ladybird does not have yet (listed under "Waiting for the browser" in COVERAGE.md). Of 15 popular extensions run
+from both stores, 13 work (see `docs/COMPATIBILITY.md`). Remaining planned members are primarily engine-coupled surfaces
+(`devtools`, `tabCapture`, `desktopCapture`, `pageCapture`, `proxy`, `gcm`, `pkcs11`, `dom.openOrClosedShadowRoot`,
+`webRequest.filterResponseData`).
+
+## What's next
+
+In order of what it unblocks for real extensions, from running the 15 extensions (`Tools/run_extension_suite.py`):
+
+| # | Work | Kind | Unblocks |
+|---|---|---|---|
+| 1 | `navigator.serviceWorker` for extension pages: MV3 pages talk to their background service worker through `controller.postMessage` and `clients` (the background runs as a page here) | E | Stylus (popup is blank), other MV3 extensions that message their worker directly |
+| 2 | `downloads` primitives in Ladybird: `host.downloads.download`, `open`, `show`, `showDefaultFolder`, `removeFile`, `getFileIcon` | H | 6 members; Video DownloadHelper's downloads, export features of many extensions |
+| 3 | `tts` through the system speech engine: `host.tts.speak`, `stop`, `pause`, `resume`, `getVoices` | H | 5 members; Read Aloud (falls back to asking for a cloud voice account) |
+| 4 | Notifications shown by Ladybird: `host.notifications.show`, `clear` | H | 3 members that are accepted today but show nothing; very widely used |
+| 5 | Offscreen documents: `host.offscreen.create`, `close` | H | 2 members accepted today with no document created; MV3 extensions that parse DOM or play audio off-screen |
+| 6 | Track whether an extension was loaded unpacked; send `declarativeNetRequest.onRuleMatchedDebug` only to unpacked ones, as Chrome does | C | AdGuard (Chrome store build) counts blocked requests correctly; it blocks already |
+| 7 | OneTab: its background receives the page's `corePing` message but never answers (cause not found yet) | ? | OneTab's tab list page |
+| 8 | `identity` sign-in window (`launchWebAuthFlow`) and `sidePanel.open` | H | sign-in to cloud features; side-panel extensions |
+| 9 | The rest of "Waiting for the browser" in COVERAGE.md: `system.*`, `power`, `management.install`/`setEnabled`, native messaging, `runtime.restart`, Firefox's `find`, `dns`, `clipboard.setImageData`, omnibox suggestions | H | 13 members |
+
+Done on 24 November 2026 while running those extensions: the Hub process split (extension calls between Ladybird's Hub
+and UI processes), CORS-free fetches from extension pages to permitted hosts, `importScripts` for service-worker
+backgrounds, `sender.origin`, top-level scope for injected scripts, Chrome's enum objects, synchronous `publicSuffix`,
+localized `getManifest()` for Firefox builds, `tabs.onReplaced` for Firefox, `fontSettings.getFontList`, and the
+`addons.mozilla.org` site-compatibility entry.
 
 ## What the coverage columns mean
 
 - **core**: members that work now. The cgx-webext core implements them, using the browser where it must (tabs, windows,
   toolbar, menus, scripting all count here: Ladybird reports its tabs and runs the primitives, and that part is done).
 - **+host**: also counts *delegated* members: the core checks permissions and passes the call to Ladybird as is, and
-  Ladybird must implement it. **Ladybird implements none of the 8 delegated members yet** (`cookies.*` and
-  `cookies.onChanged`, `tabs.onReplaced`, `runtime.onMessageExternal`), so today the "core" number is the real one;
-  "+host" is what you get once those 8 are done.
+  Ladybird must implement it (`runtime.onMessageExternal` and a few more; `cookies.*` is answered by Ladybird now).
+- **Ladybird today**: core members that also work end to end in Ladybird, leaving out those that still need a
+  browser-side primitive (see "What's next" above).
 - The denominators grow when Requirement 1.6 is met: namespaces that browsers have but the registry lacks (`debugger`,
   `declarativeContent`, `contentSettings`, `readingList`, `ttsEngine`, `accessibilityFeatures`, `printerProvider`,
   `webAuthenticationProxy`, ...) still have to be added. Expect roughly 450 Chrome and 450 Firefox members in the end.
@@ -27,7 +53,7 @@ These are not API members but block extensions that already "have" their APIs.
 
 | Work | Kind | Unblocks |
 |---|---|---|
-| Isolated worlds for content scripts, including modules they `import()` (Req 2.5) | E | Ambient Light (its module needs `chrome` in the content-script world), security of every content script, pages with Trusted Types or strict CSP without the current exemptions |
+| ~~Isolated worlds for content scripts, including modules they `import()` (Req 2.5)~~ done; limits in tasks.md | E | Ambient Light (its module needs `chrome` in the content-script world), security of every content script, pages with Trusted Types or strict CSP without the current exemptions |
 | Content-script `fetch`/XHR without page CORS for hosts the extension may access (Req 2.6, 20.4) | E | translators, Dark Reader's cross-origin stylesheet reads |
 | Extension pages inside iframes of web pages get their context reliably | E | Surfingkeys' in-page panel |
 | Service workers as real worker scopes, idle shutdown (Req 2.3, 13.5) | E | MV3 extensions that test `self`/`clients`, memory with many extensions |
@@ -102,7 +128,7 @@ a fetch there needs no new machinery. What remains from the table: `filterRespon
 
 ## Order recommended for the extensions in use now
 
-1. Isolated worlds (Ambient Light, safety of everything).
+1. ~~Isolated worlds~~ (done; see the limits in tasks.md).
 2. ~~`webNavigation`~~ and 3. ~~`webRequest` blocking and `declarativeNetRequest`~~: done; run uBlock Origin next.
 4. `cookies`, `i18n.detectLanguage` (AnyDoc).
 5. `bookmarks`, `history`, `downloads`, `sessions`, `tts` (Surfingkeys).

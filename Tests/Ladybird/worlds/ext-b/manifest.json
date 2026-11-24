@@ -1,0 +1,6 @@
+{
+  "manifest_version": 3,
+  "name": "worlds B",
+  "version": "1",
+  "content_scripts": [{ "matches": ["http://127.0.0.1/page.html"], "js": ["cs.js"], "run_at": "document_idle" }]
+}

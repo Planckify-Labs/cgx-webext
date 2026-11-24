@@ -51,14 +51,36 @@ functions in `init.syncFunctions` (`i18n.getMessage`, ...). Expose `api.chrome` 
 *Needs from the engine:* a way to inject the objects before the extension's own scripts run, and a synchronous renderer→Browser
 IPC (`Services/WebContent/WebContentServer.ipc` has the style; this would be a new message).
 
-### 4. Content scripts and isolated worlds  (largest engine task)
-On document creation call `webext_content_scripts(id, url, is_top_frame, fallback_url)` and run the returned scripts at their
-`runAt` stage. Content scripts must run in an **isolated world**: same DOM, but their own JavaScript globals, so the page cannot
-see or tamper with them and they cannot clash with page variables. `world: "MAIN"` scripts run in the page's own world.
-*Ladybird today:* `PageClient::run_javascript` (`Services/WebContent/PageClient.cpp`) evaluates a classic script against the
-document's relevant settings object, i.e. only the page's own world. A second realm per window that shares DOM wrappers is
-new engine work in `LibWeb/Bindings` and `LibWeb/HTML/Scripting` (`WindowRealm`); read `Documentation/WrapperArchitecture.md`
-first. Do **not** ship extensions by running content scripts in the main world: that is neither secure nor compatible.
+### 4. Content scripts and isolated worlds  (done in the Ladybird integration)
+On document creation call `webext_content_script_programs(url, is_top_frame, fallback_url)` and run each returned program. Every
+entry is `{ extensionId, world, program }`:
+
+- `"ISOLATED"` (the default): the program is a function expression that the browser calls with the extension's bridge for that
+  document. It must run in an **isolated world**: same DOM, but their own JavaScript globals, so the page cannot see or
+  tamper with them and they cannot clash with page variables. One world per (document, extension): all of an extension's
+  scripts and every `scripting.executeScript` of that extension in that document share it, and different extensions get
+  different ones. `chrome` (and `browser` for Firefox extensions) are globals of that world only.
+- `"MAIN"` (`world: "MAIN"` in the manifest or in `registerContentScripts`): the page's own world. The program is called with
+  no arguments, has no API, and returns the function that runs the scripts of a stage (`"document_start"`, `"document_end"`,
+  `"document_idle"`).
+- `"MAIN_BRIDGE"`: the program of an extension store's page (see STORES.md), in the page's world, with a bridge.
+
+`host.scripting.inject` carries `world` (`"ISOLATED"` or `"MAIN"`) for code injected later.
+
+*Ladybird:* `Libraries/LibWeb/Internals/ExtensionWorld.cpp` makes the world: a second realm whose global object is another
+wrapper of the document's `HTML::Window` (`Bindings::create_global_object_wrapper`), a `WrapperWorld` of type `Extension`,
+the world's own `WindowProxy` (`BrowsingContext::window_proxy_for`), and an `EnvironmentSettingsObject` of its own that answers
+everything the page decides (origin, URL, policy container, event loop, document) with the page's. That last part is what lets
+scripts, modules (`import()`), callbacks and promise jobs run in the world's realm; `principal_realm_settings_object()` returns
+it for the world's realm so that the incumbent settings object is the world's. `Internals/ExtensionBridge.cpp` evaluates the
+programs and injections in it. Code that runs in the world is not governed by the page's CSP (eval, `Function`, string timers) or
+Trusted Types, as in Chrome; the page's own policy is untouched. Firefox's `wrappedJSObject`, `cloneInto`, `exportFunction` and
+`createObjectIn` are defined natively in the world (`ExtensionWorld::install_firefox_helpers`). The world is `detach()`ed when
+its document is destroyed. `scripts/ladybird-worlds-test.sh` checks all of it in a headless build. Read
+`Documentation/WrapperArchitecture.md` in Ladybird first if you build this for another engine's realm model.
+
+Limits: see "Known limits of what is done" in specs/webextensions-full-api/tasks.md (no Xray wrappers, errors only logged,
+top-level declarations of `"MAIN"` scripts are not window properties, ...).
 
 ### 5. Messaging
 `runtime.sendMessage`, `tabs.sendMessage`, `runtime.connect`, `tabs.connect` and their events are implemented by the core's
@@ -147,8 +169,7 @@ and storage).
    package and its popup HTML loads from the extension origin.
 2. **Background + storage**: items 2, 3 and the persistence callbacks. *Done when* `Tests/Fixtures/storage-popup` counts
    alarm ticks and survives a restart.
-3. **Content scripts (interim)**: item 4 with main-world only for `hello-content-script`, clearly marked insecure and off by
-   default, while the isolated-world design lands upstream.
+3. **Content scripts**: item 4, in isolated worlds.
 4. **Messaging and UI APIs**: items 5, 6, 8. Target: Vimium-class extensions (content scripts + messaging + tabs).
 5. **Ports, commands, webNavigation** in the core, then **network APIs** (item 7).
 

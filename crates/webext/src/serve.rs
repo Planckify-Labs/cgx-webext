@@ -42,8 +42,11 @@ fn js_string(s: &str) -> String {
     serde_json::Value::String(s.to_string()).to_string().replace("\u{2028}", "\\u2028").replace("\u{2029}", "\\u2029").replace("</", "<\\/")
 }
 
-fn build_content_script_program(bundles: &[&serde_json::Value]) -> String {
-    let mut stages: Vec<(&str, String, Vec<String>)> =
+/// The code and stylesheets of `bundles`, by the stage (`runAt`) they run at.
+type Stages<'a> = Vec<(&'a str, String, Vec<String>)>;
+
+fn collect_stages<'a>(bundles: &[&serde_json::Value]) -> Stages<'a> {
+    let mut stages: Stages =
         vec![("document_start", String::new(), vec![]), ("document_end", String::new(), vec![]), ("document_idle", String::new(), vec![])];
     for bundle in bundles {
         let stage = bundle["runAt"].as_str().unwrap_or("document_idle");
@@ -58,11 +61,24 @@ fn build_content_script_program(bundles: &[&serde_json::Value]) -> String {
             slot.2.push(js_string(css.as_str().unwrap_or_default()));
         }
     }
+    stages
+}
+
+/// The program for an extension's content scripts that run in its isolated world (`world: "ISOLATED"`, the default).
+fn build_content_script_program(bundles: &[&serde_json::Value]) -> String {
+    let stages = collect_stages(bundles);
     // Deliberately not strict: content scripts are often sloppy-mode code, and nested functions inherit strictness.
     let mut out = String::from("(function (bridge) {\nvar module = { exports: {} };\n(function (module) {\n");
     out.push_str(SHIM_JS);
     out.push_str(
-        "\n})(module);\nvar shim = module.exports;\nvar init = JSON.parse(bridge.contextInit());\nif (!init) return;\n// Chrome defines an empty-looking `chrome` object on every page; scripts that Chrome extensions put in the page's world\n// test `chrome.runtime` on it. Pages where Chrome extensions run get one too. It carries no extension API.\nif (init.dialect !== 'firefox' && typeof globalThis.chrome === 'undefined') Object.defineProperty(globalThis, 'chrome', { value: {}, writable: true, configurable: true });\nvar api = shim.createApi(init, {\n  call: function (name, args) { return bridge.call(name, JSON.stringify(args === undefined ? [] : args)).then(function (t) { return t === '' ? undefined : JSON.parse(t); }); },\n  callSync: function (name, args) { var t = bridge.callSync(name, JSON.stringify(args === undefined ? [] : args)); return t === '' ? undefined : JSON.parse(t); }\n});\n// For code the extension injects later (scripting.executeScript, tabs.executeScript, insertCSS): the browser hands the API\n\
+        "\n})(module);\nvar shim = module.exports;\nvar init = JSON.parse(bridge.contextInit());\nif (!init) return;\nvar api = shim.createApi(init, {\n  call: function (name, args) { return bridge.call(name, JSON.stringify(args === undefined ? [] : args)).then(function (t) { return t === '' ? undefined : JSON.parse(t); }); },\n  callSync: function (name, args) { var t = bridge.callSync(name, JSON.stringify(args === undefined ? [] : args)); return t === '' ? undefined : JSON.parse(t); }\n});\n// This program runs in the extension's isolated world of the document: `chrome` (and, for Firefox extensions, `browser` and\n\
+// the helpers for crossing into the page) are globals of that world only, as in Chrome and Firefox. The page cannot see them.\n\
+Object.defineProperty(globalThis, 'chrome', { value: api.chrome, writable: true, configurable: true });\n\
+if (init.dialect === 'firefox') {\n\
+  Object.defineProperty(globalThis, 'browser', { value: api.browser, writable: true, configurable: true });\n\
+  bridge.installFirefoxHelpers();\n\
+}\n\
+// For code the extension injects later (scripting.executeScript, tabs.executeScript, insertCSS): the browser hands the API\n\
 // to injected code through these, which only the browser and this closure can reach.\n\
 bridge.__cgxApi = { chrome: api.chrome, browser: init.dialect === 'firefox' ? api.browser : undefined };\n\
 bridge.__cgxReport = function (token, value, error) {\n\
@@ -127,6 +143,38 @@ if (document.documentElement) {\n\
   observer.observe(document, { childList: true });\n\
 }\n\
 })",
+    );
+    out
+}
+
+/// The program for an extension's content scripts with `world: "MAIN"`. They run in the page's own world, so the program
+/// gets no bridge: nothing in it can call the extension's API, and it puts nothing of the extension on the page. It is a
+/// function expression that is called with no arguments and returns the function that runs the scripts of a stage.
+fn build_main_world_program(bundles: &[&serde_json::Value], firefox: bool) -> String {
+    let stages = collect_stages(bundles);
+    let mut out = String::from("(function () {\n");
+    // Chrome defines `chrome` on every page; page-world scripts of Chrome extensions test `chrome.runtime` on it unguarded.
+    // The stand-in has no extension API in it.
+    if !firefox {
+        out.push_str("if (typeof globalThis.chrome === 'undefined') Object.defineProperty(globalThis, 'chrome', { value: {}, writable: true, configurable: true });\n");
+    }
+    out.push_str("var stageOrder = ['document_start', 'document_end', 'document_idle'];\nvar stageStyles = [");
+    out.push_str(&stages.iter().map(|(_, _, css)| format!("[{}]", css.join(", "))).collect::<Vec<_>>().join(", "));
+    out.push_str("];\n");
+    out.push_str(
+        "function addStyles(list) {\n  if (!list.length) return;\n  var apply = function () { var root = document.head || document.documentElement; if (!root) return false; list.forEach(function (css) { var s = document.createElement('style'); s.textContent = css; root.appendChild(s); }); return true; };\n  if (!apply()) document.addEventListener('readystatechange', function once() { if (apply()) document.removeEventListener('readystatechange', once); });\n}\n",
+    );
+    // As in the isolated program, the files of all stages are one generator function, so that they share one scope.
+    out.push_str("var scripts = (function* () {\n");
+    for (i, (_, code, _)) in stages.iter().enumerate() {
+        out.push_str(code);
+        out.push('\n');
+        if i + 1 < stages.len() {
+            out.push_str("yield;\n");
+        }
+    }
+    out.push_str(
+        "}).call(globalThis);\nvar reached = -1;\nfunction runStage(name) {\n  var target = stageOrder.indexOf(name);\n  while (reached < target) {\n    reached++;\n    addStyles(stageStyles[reached]);\n    try { scripts.next(); } catch (e) { console.error(e); }\n  }\n}\nif (document.documentElement) {\n  runStage('document_start');\n} else {\n  var observer = new MutationObserver(function () { if (document.documentElement) { observer.disconnect(); runStage('document_start'); } });\n  observer.observe(document, { childList: true });\n}\nreturn runStage;\n})",
     );
     out
 }
@@ -342,7 +390,7 @@ impl Dispatcher {
     }
 
     /// The programs that run an extension's content scripts in a document, one per extension with matching scripts:
-    /// `[{ "extensionId", "program" }]`.
+    /// `[{ "extensionId", "world", "program" }]`.
     ///
     /// Each `program` is the source of one JavaScript *function expression*. The browser evaluates it in the page, calls the
     /// resulting function with the extension bridge of that document (an `ExtensionBridge` bound to the extension), and from
@@ -350,8 +398,13 @@ impl Dispatcher {
     /// bridge at those points of loading. `document_start` scripts run during the call itself. Nothing is put on the page's
     /// global object: the shim, the API objects and the bridge are only reachable from the content scripts' closures.
     ///
-    /// LIMITATION: the scripts share the page's JavaScript world (built-ins, prototypes, globals they declare with
-    /// `window.x =`). A hostile page can tamper with them. Isolated worlds are an engine task; see docs/INTEGRATION.md.
+    /// Each entry also says which world the program runs in: `"ISOLATED"` (the extension's isolated world of the document,
+    /// the default for content scripts), `"MAIN"` (scripts with `world: "MAIN"`: the page's own world; the program is called
+    /// with no bridge and returns the function that runs a stage) or `"MAIN_BRIDGE"` (the program of an extension store's
+    /// page, below). An extension with scripts for both worlds gets one entry for each.
+    ///
+    /// The scripts of one entry share a global scope. LIMITATION: in a `"MAIN"` entry that scope is a function, not the
+    /// page's global, so top-level `var` and function declarations do not become properties of `window`.
     ///
     /// A store page (see [`crate::store`]) also gets the store program first, under the bridge key
     /// [`crate::store::STORE_BRIDGE_KEY`]. It is called the same way, and the browser must only honour that bridge in documents
@@ -361,21 +414,36 @@ impl Dispatcher {
         let mut programs = vec![];
         if let Some(store) = crate::store::store_for_url(url) {
             programs
-                .push(serde_json::json!({ "extensionId": crate::store::STORE_BRIDGE_KEY, "program": crate::store::store_program(store) }));
+                .push(serde_json::json!({ "extensionId": crate::store::STORE_BRIDGE_KEY, "world": "MAIN_BRIDGE", "program": crate::store::store_program(store) }));
         }
-        let mut per_extension: Vec<(String, Vec<&serde_json::Value>)> = vec![];
+        // One program per extension and world: an extension's scripts for its isolated world share one global scope, and the ones
+        // for the page's world another.
+        type Group<'a> = (String, Vec<&'a serde_json::Value>, Vec<&'a serde_json::Value>);
+        let mut per_extension: Vec<Group> = vec![];
         for bundle in bundles.as_array().into_iter().flatten() {
             let id = bundle["extensionId"].as_str().unwrap_or_default().to_string();
-            match per_extension.iter_mut().find(|(e, _)| *e == id) {
-                Some((_, list)) => list.push(bundle),
-                None => per_extension.push((id, vec![bundle])),
+            let main = bundle["world"].as_str() == Some("MAIN");
+            let index = match per_extension.iter().position(|(e, _, _)| *e == id) {
+                Some(i) => i,
+                None => {
+                    per_extension.push((id, vec![], vec![]));
+                    per_extension.len() - 1
+                }
+            };
+            if main { per_extension[index].2.push(bundle) } else { per_extension[index].1.push(bundle) }
+        }
+        for (id, isolated, main) in per_extension {
+            if !isolated.is_empty() {
+                programs.push(
+                    serde_json::json!({ "extensionId": id, "world": "ISOLATED", "program": build_content_script_program(&isolated) }),
+                );
+            }
+            if !main.is_empty() {
+                let firefox = self.with_extension(&id, crate::browser_api::is_firefox).unwrap_or(false);
+                programs
+                    .push(serde_json::json!({ "extensionId": id, "world": "MAIN", "program": build_main_world_program(&main, firefox) }));
             }
         }
-        programs.extend(
-            per_extension
-                .into_iter()
-                .map(|(id, bundles)| serde_json::json!({ "extensionId": id, "program": build_content_script_program(&bundles) })),
-        );
         serde_json::Value::Array(programs)
     }
 

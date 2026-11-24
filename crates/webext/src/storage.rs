@@ -60,10 +60,28 @@ impl std::fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessLevel {
+    TrustedContexts,
+    TrustedAndUntrustedContexts,
+}
+
+impl AccessLevel {
+    pub fn parse(v: &Value) -> Result<AccessLevel, String> {
+        let level = v.get("accessLevel").and_then(Value::as_str).ok_or_else(|| "accessOptions.accessLevel must be a string".to_string())?;
+        match level {
+            "TRUSTED_CONTEXTS" => Ok(AccessLevel::TrustedContexts),
+            "TRUSTED_AND_UNTRUSTED_CONTEXTS" => Ok(AccessLevel::TrustedAndUntrustedContexts),
+            other => Err(format!("Invalid accessLevel: '{other}'")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StorageArea {
     data: Map<String, Value>,
     quota: Quota,
+    access_level: AccessLevel,
 }
 
 fn item_bytes(key: &str, value: &Value) -> usize {
@@ -73,7 +91,24 @@ fn item_bytes(key: &str, value: &Value) -> usize {
 
 impl StorageArea {
     pub fn new(quota: Quota) -> StorageArea {
-        StorageArea { data: Map::new(), quota }
+        StorageArea { data: Map::new(), quota, access_level: AccessLevel::TrustedAndUntrustedContexts }
+    }
+
+    pub fn with_access_level(mut self, level: AccessLevel) -> StorageArea {
+        self.access_level = level;
+        self
+    }
+
+    pub fn access_level(&self) -> AccessLevel {
+        self.access_level
+    }
+
+    pub fn set_access_level(&mut self, level: AccessLevel) {
+        self.access_level = level;
+    }
+
+    pub fn allows_untrusted(&self) -> bool {
+        self.access_level == AccessLevel::TrustedAndUntrustedContexts
     }
 
     pub fn set_quota(&mut self, quota: Quota) {
@@ -85,7 +120,7 @@ impl StorageArea {
             Ok(Value::Object(m)) => m,
             _ => Map::new(),
         };
-        StorageArea { data, quota }
+        StorageArea { data, quota, access_level: AccessLevel::TrustedAndUntrustedContexts }
     }
 
     pub fn to_json(&self) -> String {

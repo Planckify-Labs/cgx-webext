@@ -55,23 +55,28 @@ if (waitForRoot) {
 const ctx = vm.createContext(page);
 const before = new Set(Object.getOwnPropertyNames(ctx));
 const handlers = {};
-for (const { extensionId, program } of programs) {
+const mainRunners = {};
+for (const { extensionId, program, world } of programs) {
   const fn = vm.runInContext(program, ctx);
+  if (world === 'MAIN') { mainRunners[extensionId] = fn(); continue; }
   const bridge = {
     contextInit: () => JSON.stringify({ id: extensionId, baseUrl: 'chrome-extension://' + extensionId + '/', manifest: { manifest_version: 3 },
       uiLanguage: 'en', syncFunctions: [], contextId: 7, surface: { runtime: { functions: ['getURL'], events: ['onMessage'], properties: ['id', 'lastError'] } } }),
     call: () => Promise.resolve('null'),
     callSync: () => '',
     setMessageHandler: (h) => { handlers[extensionId] = h; },
+    installFirefoxHelpers: () => log.push('firefox helpers'),
   };
   fn(bridge);
 }
 if (waitForRoot) { log.push('before root'); page.insertRoot(); }
 const send = (id, m) => handlers[id](JSON.stringify(m));
+for (const run of Object.values(mainRunners)) { run('document_end'); run('document_idle'); }
 for (const id of Object.keys(handlers)) send(id, { kind: 'run', stage: 'document_end' });
 for (const id of Object.keys(handlers)) { send(id, { kind: 'run', stage: 'document_idle' }); send(id, { kind: 'run', stage: 'document_idle' }); }
-// `chrome` is put there on purpose (Chrome has one on every page); it is checked to be empty below.
-const leaked = Object.getOwnPropertyNames(ctx).filter((n) => !before.has(n) && n !== 'chrome');
+// This context is the extension's isolated world (or, for MAIN programs, the page): `chrome` is the one global the program
+// puts there on purpose.
+const leaked = Object.getOwnPropertyNames(ctx).filter((n) => !before.has(n) && n !== 'chrome' && n !== 'browser');
 console.log(JSON.stringify({ log, leaked, appended, pageChrome: typeof ctx.chrome, pageBrowser: typeof ctx.browser, pageChromeKeys: ctx.chrome ? Object.keys(ctx.chrome) : null }));
 "#;
 
@@ -188,7 +193,44 @@ fn programs_run_in_order_with_their_own_api_and_leak_nothing() {
     assert_eq!(result["appended"], json!(["body { color: red }"]));
     // Sloppy-mode globals a content script creates on purpose are visible, as in a main-world script; nothing else is.
     assert_eq!(result["leaked"], json!(["undeclaredGlobal"]), "the shim, the API and the bridge must not leak onto the page");
-    // As in Chrome, the page has a `chrome` object but no extension API on it, and no `browser`.
+    // In its isolated world a Chrome extension has `chrome`, as a global (`window.chrome.runtime` works), and no `browser`.
     assert_eq!((result["pageChrome"].as_str(), result["pageBrowser"].as_str()), (Some("object"), Some("undefined")));
-    assert_eq!(result["pageChromeKeys"], json!([]));
+    assert_eq!(result["pageChromeKeys"], json!(["runtime"]));
+}
+
+#[test]
+fn main_world_scripts_are_a_program_of_their_own_without_the_api() {
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("SKIPPED: needs `node`");
+        return;
+    }
+    let d = Dispatcher::new(Rc::new(NullHost), Registry::builtin());
+    let mut files = Files::new();
+    files.insert("iso.js", b"log.push('isolated ' + chrome.runtime.id);".to_vec());
+    files.insert("main.js", b"log.push('main ' + typeof chrome.runtime + ' ' + typeof browser);".to_vec());
+    d.install(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        parse_manifest(
+            r#"{"manifest_version":3,"name":"a","version":"1","content_scripts":[
+                {"matches":["https://page.test/*"],"js":["iso.js"]},
+                {"matches":["https://page.test/*"],"js":["main.js"],"world":"MAIN"}]}"#,
+        )
+        .manifest
+        .unwrap(),
+        InstallOptions { base_url: "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/".into(), locales: vec![], files },
+    );
+    let programs = d.content_script_programs("https://page.test/", true, None);
+    let worlds: Vec<&str> = programs.as_array().unwrap().iter().map(|p| p["world"].as_str().unwrap()).collect();
+    assert_eq!(worlds, ["ISOLATED", "MAIN"], "one program per world, in the same document");
+    // The MAIN program is called with no bridge and must not mention one.
+    let main = programs[1]["program"].as_str().unwrap();
+    assert!(!main.contains("bridge") && !main.contains("createApi"), "the MAIN program carries no API and no bridge");
+
+    let out = Command::new("node").arg("-e").arg(HARNESS).arg(programs.to_string()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Both ran. (This harness has one global for both programs, so what `chrome` is to the MAIN script is not checked here;
+    // tests/Ladybird/worlds checks it in a browser, where the two programs run in different realms.)
+    let log: Vec<&str> = result["log"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(log.iter().any(|l| l.starts_with("main ")) && log.iter().any(|l| l.starts_with("isolated ")), "{result}");
 }

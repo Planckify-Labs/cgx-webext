@@ -453,22 +453,22 @@ mod tests {
     fn resolves_longest_member_prefix_and_classifies() {
         let r = report(
             M,
-            "chrome.storage.local.get.bind(x); chrome.cookies.get({}); chrome.runtime.lastError.message; chrome.downloads.download({});",
+            "chrome.storage.local.get.bind(x); chrome.runtime.onMessageExternal.addListener(f); chrome.runtime.lastError.message; chrome.gcm.register([], cb);",
         );
         let status = |n: &str| r.apis.iter().find(|a| a.name == n).map(|a| a.support.clone());
         assert_eq!(status("storage.local.get"), Some(Support::Known(Status::Implemented)));
-        assert_eq!(status("cookies.get"), Some(Support::Known(Status::Delegated)));
+        assert_eq!(status("runtime.onMessageExternal"), Some(Support::Known(Status::Delegated)));
         assert_eq!(status("runtime.lastError"), Some(Support::Known(Status::Implemented)));
-        assert_eq!(status("downloads.download"), Some(Support::Known(Status::Planned)));
+        assert_eq!(status("gcm.register"), Some(Support::Known(Status::Planned)));
         assert_eq!(r.verdict, Verdict::Blocked);
-        assert_eq!(r.blockers, ["downloads.download"]);
+        assert_eq!(r.blockers, ["gcm.register"]);
     }
 
     #[test]
     fn verdicts() {
         assert_eq!(report(M, "chrome.storage.local.set({}); chrome.i18n.getMessage('x')").verdict, Verdict::Ready);
-        assert_eq!(report(M, "chrome.storage.local.set({}); chrome.cookies.get({})").verdict, Verdict::NeedsHost);
-        let r = report(M, "chrome.storage.local.set({}); chrome.cookies.get({})");
+        assert_eq!(report(M, "chrome.storage.local.set({}); chrome.runtime.onMessageExternal.addListener(f)").verdict, Verdict::NeedsHost);
+        let r = report(M, "chrome.storage.local.set({}); chrome.runtime.onMessageExternal.addListener(f)");
         assert!((r.core_percent - 50.0).abs() < 1e-9 && (r.with_host_percent - 100.0).abs() < 1e-9);
         // Nothing used at all is trivially ready.
         assert_eq!(report(M, "console.log(1)").verdict, Verdict::Ready);

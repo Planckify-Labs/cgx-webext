@@ -1,0 +1,54 @@
+<!doctype html><meta charset="utf-8"><title>worlds: page</title>
+<body>
+<div id="shared">shared</div>
+<script>
+// The page: its own globals, its own tampering with built-ins, and a look, a little later, at what the extensions did.
+const report = (c, ok, d) => fetch('/report?c=' + encodeURIComponent(c) + '&ok=' + (ok ? 1 : 0) + '&d=' + encodeURIComponent(String(d === undefined ? '' : d).slice(0, 200)));
+window.pageGlobal = 'page-value';
+const pageErrors = [];
+window.addEventListener('error', (e) => { pageErrors.push(e.message); });
+window.addEventListener('unhandledrejection', (e) => { pageErrors.push('rejection'); });
+const el = document.getElementById('shared');
+el.pageExpando = 'page-expando';
+let pageClicks = 0;
+el.addEventListener('click', () => { pageClicks++; });
+const realPush = Array.prototype.push, realStringify = JSON.stringify, realAdd = EventTarget.prototype.addEventListener,
+      realQuery = Document.prototype.querySelector;
+let pushCalls = 0, stringifyCalls = 0, addCalls = 0, queryCalls = 0;
+Array.prototype.push = function () { pushCalls++; return realPush.apply(this, arguments); };
+JSON.stringify = function () { stringifyCalls++; return realStringify.apply(JSON, arguments); };
+EventTarget.prototype.addEventListener = function () { addCalls++; return realAdd.apply(this, arguments); };
+Document.prototype.querySelector = function () { queryCalls++; return realQuery.apply(this, arguments); };
+// Each override is exercised once here, so that the counters below mean "the page called it and nobody else did".
+[].push(1); JSON.stringify({}); window.addEventListener('cgx-self-test', () => {}); document.querySelector('#shared');
+
+setTimeout(() => document.dispatchEvent(new CustomEvent('cgx-ping', { detail: 'from-page' })), 1500);
+
+setTimeout(async () => {
+  const check = (c, cond, d) => report(c, !!cond, d);
+  check('page.tamper-counters-own-calls-only', pushCalls >= 1 && stringifyCalls === 1 && addCalls === 1 && queryCalls === 1,
+        `push=${pushCalls} stringify=${stringifyCalls} add=${addCalls} query=${queryCalls}`);
+  check('page.cs-global-invisible', typeof csGlobal === 'undefined' && typeof earlyGlobal === 'undefined' && typeof injected === 'undefined', `${typeof csGlobal} ${typeof earlyGlobal} ${typeof injected}`);
+  check('page.cs-errors-not-reported-to-page', !pageErrors.some((m) => String(m).includes('cs-boom') || m === 'rejection'), pageErrors.join('|'));
+  check('page.ext-b-global-invisible', typeof extBGlobal === 'undefined');
+  check('page.no-extension-api', (typeof chrome === 'undefined' || (chrome.runtime === undefined && chrome.storage === undefined && chrome.scripting === undefined)) && typeof browser === 'undefined' && typeof cloneInto === 'undefined' && typeof exportFunction === 'undefined',
+        `chrome=${typeof chrome} runtime=${typeof chrome !== 'undefined' && typeof chrome.runtime} browser=${typeof browser}`);
+  check('page.cs-expando-invisible', el.csExpando === undefined && el.pageExpando === 'page-expando', `${el.csExpando}`);
+  check('page.sees-cs-dom-change', !!document.getElementById('from-cs') && document.getElementById('from-cs').textContent === 'made by the content script');
+  check('page.sees-cs-listener-effects', pageClicks === 1, `clicks=${pageClicks}`);
+  // An extension's module imported by the page runs in the page's world: no chrome.
+  const url = document.documentElement.dataset.extUrl;
+  if (url) {
+    try {
+      const m = await import(url + 'mod.js');
+      check('module.page-import-has-no-chrome', m.hasChrome === false && m.pageGlobalVisible === true, `hasChrome=${m.hasChrome} pageGlobalVisible=${m.pageGlobalVisible}`);
+    } catch (e) { check('module.page-import-has-no-chrome', false, e); }
+  } else check('module.page-import-has-no-chrome', false, 'no extension url published');
+  const ff = window.ffApi;
+  check('firefox.cloneInto-result-is-page-object', ff && ff.a === 1 && ff.nested.b.length === 2 && Object.getPrototypeOf(ff) === Object.prototype && ff.nested.b instanceof Array && typeof ff.fn === 'function' && ff.fn() === 7 && ff.fn instanceof Function,
+        ff && `a=${ff.a} blen=${ff.nested && ff.nested.b.length} proto=${Object.getPrototypeOf(ff) === Object.prototype} arr=${ff.nested.b instanceof Array} fnType=${typeof ff.fn} fn=${ff.fn && ff.fn()} fnInst=${ff.fn instanceof Function}`);
+  check('firefox.exportFunction-callable-from-page', typeof window.ffCall === 'function' && window.ffCall instanceof Function && window.ffCall(5) === 10 && window.ffCall.name === 'ffCall', `type=${typeof window.ffCall} inst=${window.ffCall instanceof Function} call=${window.ffCall && window.ffCall(5)} name=${window.ffCall && window.ffCall.name}`);
+  setTimeout(() => { location = '/page2.html'; }, 500);
+}, 3000);
+</script>
+</body>

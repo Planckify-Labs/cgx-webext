@@ -48,7 +48,8 @@ endif()
 file(GLOB_RECURSE _webext_rust_sources CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/crates/*.rs"
     "${CMAKE_CURRENT_SOURCE_DIR}/crates/*/Cargo.toml"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Data/*.json")
+    "${CMAKE_CURRENT_SOURCE_DIR}/Data/*.json"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Shim/*.js")
 
 # Rust's release profile normally aborts on panic. The FFI layer contains panics with catch_unwind so a bug in an
 # extension request cannot take the browser down, which needs unwinding.

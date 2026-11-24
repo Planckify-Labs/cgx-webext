@@ -166,18 +166,18 @@ int main(int argc, char** argv)
     CHECK(r.called == 1 && r.ok && strcmp(r.json, "{\"k\":42}") == 0);
 
     /* Errors are reported, not crashes. */
-    call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"downloads.download\",\"args\":[]}");
+    call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"gcm.register\",\"args\":[]}");
     CHECK(r.called == 1 && !r.ok && strstr(r.json, "NotAvailable"));
     call(h, &r, "{not json");
     CHECK(r.called == 1 && !r.ok && strstr(r.json, "InvalidArguments"));
     call(h, &r, "{\"extensionId\":\"ghost\",\"function\":\"storage.local.get\"}");
     CHECK(r.called == 1 && !r.ok);
 
-    /* Delegated call is answered asynchronously by the host. */
+    /* Host-backed call is answered asynchronously by the host (cookies filtered by host permissions). */
     call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"cookies.getAll\",\"args\":[{}]}");
     CHECK(r.called == 0 && host.pending_browser_token != 0);
-    webext_complete(h, host.pending_browser_token, true, S("[{\"name\":\"c\"}]"));
-    CHECK(r.called == 1 && r.ok && strcmp(r.json, "[{\"name\":\"c\"}]") == 0);
+    webext_complete(h, host.pending_browser_token, true, S("[{\"name\":\"c\",\"domain\":\"example.com\",\"path\":\"/\",\"secure\":true}]"));
+    CHECK(r.called == 1 && r.ok && strstr(r.json, "\"name\":\"c\"") != NULL);
 
     /* ...or fails. */
     call(h, &r, "{\"extensionId\":\"testextid\",\"function\":\"cookies.getAll\",\"args\":[{}]}");

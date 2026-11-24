@@ -34,6 +34,22 @@
   Object.defineProperty(globalThis, 'chrome', { value: api.chrome, writable: true, configurable: true });
   // Firefox gives extensions both namespaces; Chrome only `chrome`, and extensions test `typeof browser` to tell them apart.
   if (init.dialect === 'firefox') Object.defineProperty(globalThis, 'browser', { value: api.browser, writable: true, configurable: true });
+  // A background service worker runs as a page here, so it lacks the worker's importScripts. Classic (non-module) workers
+  // get one that loads the extension's own files synchronously; relative URLs resolve against the worker script, as in a
+  // worker. Module workers have no importScripts in Chrome either.
+  const background = (init.manifest && init.manifest.background) || {};
+  if (init.contextKind === 'background' && init.dialect !== 'firefox' && background.service_worker && background.type !== 'module'
+      && typeof bridge.importScript === 'function' && typeof globalThis.importScripts !== 'function') {
+    const workerUrl = new URL(String(background.service_worker).replace(/^\/+/, ''), init.baseUrl);
+    Object.defineProperty(globalThis, 'importScripts', {
+      value: function importScripts(...urls) {
+        for (const url of urls) bridge.importScript(new URL(String(url), workerUrl).href);
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+
   // An extension's popup sizes itself to its content, as in Chrome and Firefox, and closes with window.close().
   if (init.isPopup) {
     const measure = () => {

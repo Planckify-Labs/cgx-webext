@@ -136,14 +136,21 @@ fn storage_popup_full_flow() {
     assert!(host.events.borrow().iter().any(|(e, _)| e == "tabs.onCreated"), "tabs that appear fire tabs.onCreated");
     assert_eq!(call(&d, &id, "permissions.request", vec![json!({"permissions": ["history"]})]).unwrap(), json!(true));
 
-    // The history API is planned, so even with the permission it fails clearly.
-    assert_eq!(call(&d, &id, "history.search", vec![json!({"text": ""})]).unwrap_err().kind, ErrorKind::NotAvailable);
+    // history.search is implemented and routes to host.history.search once permission is granted.
+    assert_eq!(call(&d, &id, "history.search", vec![json!({"text": ""})]).unwrap(), json!([]));
+    // Unimplemented APIs like gcm still fail clearly.
+    assert_eq!(call(&d, &id, "gcm.register", vec![]).unwrap_err().kind, ErrorKind::NotAvailable);
 
     // Surface handed to the shim: storage, alarms, i18n visible; cookies are not.
     let init = d.init_data_for(&id).unwrap();
     assert!(init["surface"]["storage"].is_object() && init["surface"]["cookies"].is_null());
     assert!(init["surface"]["history"].is_object(), "history was granted at runtime");
-    assert_eq!(init["syncFunctions"].as_array().unwrap().len(), 5);
+    // getUILanguage is a language tag, which Intl accepts ("en-US", never "en_US").
+    assert!(!init["uiLanguage"].as_str().unwrap().contains('_'));
+    let sync_functions = init["syncFunctions"].as_array().unwrap();
+    assert!(sync_functions.contains(&json!("i18n.getMessage")));
+    // Firefox's publicSuffix answers synchronously (uBlock Origin relies on it).
+    assert!(sync_functions.contains(&json!("publicSuffix.getDomain")));
 }
 
 #[test]

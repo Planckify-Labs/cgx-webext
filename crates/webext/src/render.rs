@@ -45,17 +45,19 @@ pub fn registry_markdown(reg: &Registry) -> String {
     s.push_str(
         "- **+host**: also counts `delegated` members, which the crate validates and routes but the embedding browser must implement.\n",
     );
-    s.push_str("- **planned**: not available yet; calling it fails with a clear error.\n\n");
-    s.push_str("| Browser | Members | core | +host | planned |\n|---|---:|---:|---:|---:|\n");
+    s.push_str("- **planned**: not available yet; calling it fails with a clear error.\n");
+    s.push_str("- **Ladybird today**: core members that also work end to end in Ladybird. The rest of the core members need a browser-side primitive the integration does not have yet; they are listed under [Waiting for the browser](#waiting-for-the-browser).\n\n");
+    s.push_str("| Browser | Members | core | +host | Ladybird today | planned |\n|---|---:|---:|---:|---:|---:|\n");
     for engine in [Engine::Chrome, Engine::Firefox] {
         let c = reg.counts(engine);
         let _ = writeln!(
             s,
-            "| {} | {} | {:.1}% | {:.1}% | {} |",
+            "| {} | {} | {:.1}% | {:.1}% | {:.1}% | {} |",
             engine_name(engine),
             c.total(),
             c.core_percent(),
             c.with_host_percent(),
+            reg.working_in_browser(engine) as f64 * 100.0 / c.total().max(1) as f64,
             c.planned + c.unsupported
         );
     }
@@ -71,6 +73,10 @@ pub fn registry_markdown(reg: &Registry) -> String {
     for ns in names {
         let planned = chrome.get(ns).map_or("–".to_string(), |c| (c.planned + c.unsupported).to_string());
         let _ = writeln!(s, "| `{ns}` | {} | {} | {planned} |", cell(chrome.get(ns)), cell(firefox.get(ns)));
+    }
+    s.push_str("\n## Waiting for the browser\n\nThe core provides these, but Ladybird does not have the browser-side part yet, so calling them fails or has no visible effect:\n\n");
+    for (name, what) in reg.awaiting_browser() {
+        let _ = writeln!(s, "- `{name}`: {what}");
     }
     s.push_str("\nStatus notes (partial members):\n\n");
     for m in reg.members().iter().filter(|m| m.status == crate::registry::Status::Partial) {

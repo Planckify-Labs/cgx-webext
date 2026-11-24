@@ -77,8 +77,9 @@ speed, not the hook: requests are answered in under 60 ms once it is ready).
 - `contentScripts.register` (Firefox), `webRequest.handlerBehaviorChanged`, `storage.<area>.onChanged`,
   `extension.inIncognitoContext`; `'wasm-unsafe-eval'` in the default extension CSP; `abp:*`-style `targetUrlPatterns`.
 - Engine: extension origins are potentially trustworthy (secure contexts, no mixed-content blocking); extension files are
-  exempt from the page's CSP, may be fetched cross-origin, and script URLs into an extension pass Trusted Types (until
-  isolated worlds exist). Pages where Chrome extensions run get an empty `window.chrome`, as in Chrome.
+  exempt from the page's CSP and may be fetched cross-origin. (Script URLs into an extension used to pass Trusted Types for
+  everybody; that exemption is gone now that content scripts have isolated worlds, see below.) Pages where a Chrome
+  extension has `world: "MAIN"` scripts get an empty `window.chrome`, as in Chrome.
 - Generated background page at the root (`_generated_background_page.html`), so relative URLs resolve; `setIcon`,
   `setPopup` and relative `tabs.create` URLs resolve against the calling page; `sender.tab.url` uses the sender's
   document when the tab's snapshot lags.
@@ -97,14 +98,58 @@ See [../../COMPATIBILITY.md](../../COMPATIBILITY.md) for the six extensions run 
   `CSSStyleSheet.disabled` is honoured. Next: log the detector's inputs while Dark Reader's own sheets are present
   (`document.styleSheets` membership of its `<style class="darkreader">` nodes, `adoptedStyleSheets`).
 
+## Done: isolated worlds for content scripts (Requirement 2.5)
+
+- [x] One isolated world per (document, extension) in Ladybird: its own realm, `WindowProxy`, wrappers and module map, on
+      the document's DOM. Content scripts, `scripting.executeScript` / `tabs.executeScript` (default `ISOLATED`),
+      `registerContentScripts` and modules a content script `import()`s run in it; globals persist between injections;
+      other extensions get other worlds. `chrome` / `browser` are globals of that world and never the page's.
+- [x] `world: "MAIN"` (manifest, `registerContentScripts`, `executeScript`) runs in the page's world and gets no API: the
+      core now emits a separate program per world (`webext_content_script_programs` entries carry `world`) and
+      `host.scripting.inject` carries `world`.
+- [x] Pages that replace `Array.prototype.push`, `JSON.stringify`, `EventTarget.prototype.addEventListener` or
+      `document.querySelector` do not affect content scripts; expandos are per world; DOM changes and events are shared;
+      `setTimeout`, `Promise`, `fetch`, `MutationObserver`, `requestAnimationFrame` work in the world.
+- [x] Dynamic `import()` of a `web_accessible_resources` module from a content script runs in the world and sees `chrome`
+      (Ambient light for YouTube gets past its import; see COMPATIBILITY.md).
+- [x] Firefox: `window.wrappedJSObject` (and on DOM nodes), `cloneInto`, `exportFunction`, `createObjectIn`.
+- [x] Exemptions that existed "until isolated worlds exist": the Trusted Types exemption for extension script URLs is
+      removed (the world is exempt instead, the page is not any more). The CSP exemption for requests to extension URLs
+      stays (Chrome bypasses the page's CSP for its extension scheme: content scripts insert `<script>`, `<link>` and `<img>`
+      elements and stylesheets with fonts for their web-accessible files into the page).
+- [x] Headless Ladybird reports its views as the tabs of one window to the extension core, so that `tabs.*` and
+      `scripting.executeScript` can be exercised without the Qt UI.
+- [x] `scripts/ladybird-worlds-test.sh` (Tests/Ladybird/worlds): 76 checks, including strict-CSP and Trusted Types pages, two
+      extensions in one document, nine navigations in a row with pending work in the world, an iframe removed while its
+      world has work pending.
+
+Limits of isolated worlds, plainly:
+
+- No Xray wrappers: a content script that reads a page object sees the page's getters and prototypes, and what
+  `exportFunction` exports receives the page's arguments as they are. `cloneInto` copies plain objects, arrays, and what
+  structured clone can copy; it refuses DOM nodes.
+- Uncaught errors and unhandled rejections of a content script do not reach the page (as in Chrome), but they are only
+  written to the debug log: they do not show up in the console of the page's devtools, and the extension cannot
+  listen for them with its own `window.onerror`.
+- Event listeners are not per world: a page listener fires for events a content script dispatches and vice versa (as in
+  Chrome, for DOM events).
+- The scripts of a `"MAIN"` entry share a function scope: their top-level `var` and function declarations are not
+  properties of `window`.
+- A content script's `fetch`/XHR is still subject to the page's CSP `connect-src` and to CORS (Req 2.6 is open).
+- Module scripts and fetches that a world makes use their own settings object, whose fetch group is not aborted when the
+  document is (they end when the document is destroyed).
+- Rust-implemented interfaces still create their wrappers through `set_rust_wrapper`, which refuses a detached world; script
+  that runs in a world after its document is destroyed and touches one of those would hit it. None is reachable from the
+  tests.
+- Worlds are only for documents that scripts can run in: a sandboxed iframe without `allow-scripts` gets no content scripts.
+
 ## Next
 
 The full plan to 100%, by kind of work, is in [roadmap.md](roadmap.md). In the order the reference extensions need them:
 
 1. Rest of Req 10: `filterResponseData`; requests of workers and WebSockets; `onAuthRequired`; failed navigations; uBlock
    Origin's cosmetic filtering and popup counts, checked in a window.
-2. Req 2.5 isolated worlds for content scripts (security, and pages that shadow built-ins).
-3. Req 2.3 service workers as real worker scopes; Req 13.5 idle shutdown.
+2. Req 2.3 service workers as real worker scopes; Req 13.5 idle shutdown.
 4. Req 11 `cookies` against Ladybird's cookie jar; `browsingData`.
 5. Req 12 `about:extensions` (enable/disable, permissions, errors, load unpacked); Req 15.3 permission prompt.
 6. Req 14: `notifications`, `downloads`, `history`, `bookmarks`, `sessions`, `idle`, `i18n.detectLanguage`, and the rest.
@@ -115,7 +160,6 @@ The full plan to 100%, by kind of work, is in [roadmap.md](roadmap.md). In the o
 
 ## Known limits of what is done
 
-- Content scripts and injected code still share the page's JavaScript world (Req 2.5).
 - `tabs.captureVisibleTab` grabs the view's widget; with GPU compositing on some platforms the capture can be blank.
 - Restored tabs that have not loaded yet are not reported to extensions until they load.
 - `windows.create({type: "popup"})` opens Ladybird's popup-window style; `panel` is treated as `popup`.

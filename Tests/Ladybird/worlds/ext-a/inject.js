@@ -1,0 +1,1 @@
+window.injectedByExt = 'yes';
