@@ -3,27 +3,29 @@
 ## Quickest way
 
 ```sh
-cd /home/cstralpt/cgx-translation-research/cgx-webext
+cd cgx-webext
 scripts/run-ladybird.sh --demo https://example.com/
 ```
 
 `scripts/run-ladybird.sh --help` lists the options (`--demo`, `--trace`, `--fresh`, `--build`). Any extension directory or
 `.crx`/`.xpi`/`.zip` you pass is loaded; URLs and Ladybird's own flags pass through.
 
-## The build on this machine
+## The build
 
-Already built, with extension support, at:
+These instructions assume a Ladybird checkout next to this repository, with the integration applied
+(`Integration/ladybird/apply.sh`) and built with extension support:
 
 ```
-/home/cstralpt/cgx-translation-research/ladybird/Build/release/bin/Ladybird
+parent/
+  cgx-webext/                         this repository
+  ladybird/Build/release/bin/Ladybird  (set LADYBIRD_DIR for scripts/run-ladybird.sh if yours is elsewhere)
 ```
 
-(branch `cgx-webext` of the Ladybird clone). Below, `LB` is that path and `CGX` is
-`/home/cstralpt/cgx-translation-research/cgx-webext`.
+Below, `LB` is the Ladybird binary and `CGX` this repository:
 
 ```sh
-LB=/home/cstralpt/cgx-translation-research/ladybird/Build/release/bin/Ladybird
-CGX=/home/cstralpt/cgx-translation-research/cgx-webext
+LB="$PWD/../ladybird/Build/release/bin/Ladybird"   # run from cgx-webext/
+CGX="$PWD"
 ```
 
 ## 1. Try the demo extension first
@@ -162,7 +164,7 @@ Unimplemented APIs fail with "<name> is not implemented yet in Ladybird" in the 
 ## Rebuilding after changes
 
 ```sh
-cd /home/cstralpt/cgx-translation-research/ladybird
+cd ../ladybird   # from cgx-webext/
 ninja -C Build/release -j8 ladybird
 ```
 
